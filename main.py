@@ -13,7 +13,7 @@ from telegram.ext import (
 )
 
 from config import BOT_TOKEN
-from utils.loader import get_source
+from utils.loader import get_all_sources
 
 logging.basicConfig(level=logging.INFO)
 
@@ -21,53 +21,54 @@ logging.basicConfig(level=logging.INFO)
 # ================= START =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
+    await update.message.reply_text(
         "📚 Manga Bot Online!\n\n"
         "Use:\n"
-        "/search toonbr nome\n"
-        "/search mangaonline nome\n"
+        "/buscar nome_do_manga"
     )
-    await update.message.reply_text(text)
 
 
-# ================= SEARCH =================
+# ================= BUSCAR =================
 
-async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 2:
-        return await update.message.reply_text("Uso: /search fonte nome")
+async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        return await update.message.reply_text("Use: /buscar nome")
 
-    source_name = context.args[0]
-    query = " ".join(context.args[1:])
-
-    source = get_source(source_name)
-
-    if not source:
-        return await update.message.reply_text("Fonte não encontrada.")
-
-    results = await source.search(query)
-
-    if not results:
-        return await update.message.reply_text("Nenhum resultado.")
+    query = " ".join(context.args)
+    sources = get_all_sources()
 
     buttons = []
 
-    for manga in results[:10]:
-        title = manga.get("title") or manga.get("name")
-        url = manga.get("url") or manga.get("slug")
+    for source_name, source in sources.items():
+        try:
+            results = await source.search(query)
 
-        if "slug" in manga:
-            url = f"https://beta.toonbr.com/manga/{manga['slug']}"
+            for manga in results[:3]:  # limita 3 por fonte
+                title = manga.get("title") or manga.get("name")
+                url = manga.get("url") or manga.get("slug")
 
-        buttons.append([
-            InlineKeyboardButton(
-                title,
-                callback_data=f"manga|{source_name}|{url}"
-            )
-        ])
+                if "slug" in manga:
+                    url = f"https://toonbr.com/manga/{manga['slug']}"
+
+                buttons.append([
+                    InlineKeyboardButton(
+                        f"{title} ({source_name})",
+                        callback_data=f"manga|{source_name}|{url}"
+                    )
+                ])
+
+        except Exception as e:
+            print(f"Erro na fonte {source_name}: {e}")
+
+    if not buttons:
+        return await update.message.reply_text("Nenhum resultado encontrado.")
 
     reply_markup = InlineKeyboardMarkup(buttons)
 
-    await update.message.reply_text("Resultados:", reply_markup=reply_markup)
+    await update.message.reply_text(
+        f"Resultados para: {query}",
+        reply_markup=reply_markup
+    )
 
 
 # ================= MANGA =================
@@ -78,17 +79,21 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     _, source_name, url = query.data.split("|", 2)
 
-    source = get_source(source_name)
-    chapters = await source.chapters(url)
+    source = get_all_sources()[source_name]
+
+    try:
+        chapters = await source.chapters(url)
+    except Exception:
+        return await query.message.reply_text("Erro ao carregar capítulos.")
 
     buttons = []
 
     for ch in chapters[:10]:
         name = ch.get("name") or f"Cap {ch.get('chapter_number')}"
-        ch_url = ch.get("url")
+        ch_url = ch.get("url") or ch.get("id")
 
-        if not ch_url:
-            ch_url = f"https://beta.toonbr.com/read/{ch['id']}"
+        if "id" in ch:
+            ch_url = f"https://toonbr.com/read/{ch['id']}"
 
         buttons.append([
             InlineKeyboardButton(
@@ -98,6 +103,7 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
 
     reply_markup = InlineKeyboardMarkup(buttons)
+
     await query.edit_message_text("Capítulos:", reply_markup=reply_markup)
 
 
@@ -109,8 +115,12 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     _, source_name, url = query.data.split("|", 2)
 
-    source = get_source(source_name)
-    images = await source.pages(url)
+    source = get_all_sources()[source_name]
+
+    try:
+        images = await source.pages(url)
+    except Exception:
+        return await query.message.reply_text("Erro ao carregar páginas.")
 
     if not images:
         return await query.message.reply_text("Capítulo vazio.")
@@ -126,7 +136,7 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("search", search))
+    app.add_handler(CommandHandler("buscar", buscar))
     app.add_handler(CallbackQueryHandler(manga_callback, pattern="^manga"))
     app.add_handler(CallbackQueryHandler(chapter_callback, pattern="^chapter"))
 
