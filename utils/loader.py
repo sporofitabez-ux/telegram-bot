@@ -1,10 +1,8 @@
-# utils/loader.py
-
-from sources.toonbr import ToonBr
-from sources.mangaflix import MangaFlix
+from sources.toonbr import ToonBrSource
+from sources.mangaflix import MangaFlixSource
 
 def get_all_sources():
     return {
-        "ToonBr": ToonBr(),
-        "MangaFlix": MangaFlix()
+        "ToonBr": ToonBrSource(),
+        "MangaFlix": MangaFlixSource()
     }
