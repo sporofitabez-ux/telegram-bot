@@ -1,5 +1,6 @@
 import logging
 import os
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -12,11 +13,13 @@ from utils.cbz import create_cbz
 
 logging.basicConfig(level=logging.INFO)
 
+
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📚 Manga Bot Online!\nUse: /buscar nome_do_manga"
     )
+
 
 # ================= BUSCAR =================
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -30,7 +33,7 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for source_name, source in sources.items():
         try:
             results = await source.search(query)
-            for manga in results[:3]:
+            for manga in results[:5]:
                 title = manga.get("title") or manga.get("name")
                 url = manga.get("url") or manga.get("slug")
                 callback_id = f"manga|{source_name}|{url}"
@@ -46,6 +49,7 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
+
 # ================= MANGA =================
 async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -59,14 +63,16 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await query.message.reply_text("Erro ao carregar capítulos.")
 
     buttons = []
-    for ch in chapters[:15]:
+    for ch in chapters[:20]:
         ch_id = ch.get("url") or ch.get("id")
-        buttons.append([InlineKeyboardButton(ch.get("name"), callback_data=f"chapter|{source_name}|{ch_id}")])
+        cap_number = ch.get("chapter_number") or ch.get("name")
+        buttons.append([InlineKeyboardButton(f"{cap_number}", callback_data=f"chapter|{source_name}|{ch_id}")])
 
     await query.edit_message_text(
         "Selecione o capítulo:",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
+
 
 # ================= CHAPTER =================
 async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -89,6 +95,7 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chapter_name = "Capítulo"
             manga_title = "Manga"
 
+        # Busca imagens
         images = await source.pages(chapter_id)
     except Exception:
         return await status.edit_text("Erro ao carregar capítulo.")
@@ -96,7 +103,10 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not images:
         return await status.edit_text("Capítulo vazio.")
 
-    cbz_path, cbz_name = await create_cbz(images, manga_title, chapter_name)
+    # Barra de progresso simples
+    total = len(images)
+    message = await status.edit_text(f"📦 Baixando 0/{total} páginas...")
+    cbz_path, cbz_name = await create_cbz(images, manga_title, chapter_name, progress_message=message)
 
     await query.message.reply_document(
         document=open(cbz_path, "rb"),
@@ -104,7 +114,8 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     os.remove(cbz_path)
-    await status.delete()
+    await message.delete()
+
 
 # ================= MAIN =================
 def main():
@@ -114,6 +125,7 @@ def main():
     app.add_handler(CallbackQueryHandler(manga_callback, pattern="^manga"))
     app.add_handler(CallbackQueryHandler(chapter_callback, pattern="^chapter"))
     app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
