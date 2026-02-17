@@ -1,18 +1,20 @@
 # sources/toonbr.py
+import aiohttp
 import asyncio
-from utils.http import GET
-from utils.parser import parse_json
-from utils.cbz import create_cbz
 
 class ToonBrSource:
     name = "ToonBr"
     apiUrl = "https://api.toonbr.com"
     cdnUrl = "https://cdn2.toonbr.com"
 
+    async def _get_json(self, url):
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                return await resp.json()
+
     async def search(self, query: str):
         url = f"{self.apiUrl}/api/manga?search={query}"
-        resp = await GET(url)
-        data = parse_json(resp)
+        data = await self._get_json(url)
         results = []
         for m in data.get("data", []):
             results.append({
@@ -23,13 +25,12 @@ class ToonBrSource:
 
     async def chapters(self, manga_id: str):
         url = f"{self.apiUrl}/api/manga/{manga_id}"
-        resp = await GET(url)
-        data = parse_json(resp)
+        data = await self._get_json(url)
         chapters = []
         for ch in data.get("chapters", []):
             chapters.append({
                 "name": f"Cap {ch.get('number')}",
-                "url": ch.get("_id"),  # ID real do capítulo
+                "url": ch.get("_id"),
                 "chapter_number": ch.get("number"),
                 "manga_title": data.get("name"),
             })
@@ -37,9 +38,8 @@ class ToonBrSource:
 
     async def pages(self, chapter_id: str):
         url = f"{self.apiUrl}/api/chapter/{chapter_id}"
-        resp = await GET(url)
-        data = parse_json(resp)
+        data = await self._get_json(url)
         pages = []
-        for idx, p in enumerate(data.get("pages", [])):
+        for p in data.get("pages", []):
             pages.append(f"{self.cdnUrl}{p.get('imageUrl')}")
         return pages
