@@ -1,7 +1,14 @@
 import os
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    MessageHandler,
+    filters
+)
 from utils.loader import get_all_sources
 from utils.cbz import create_cbz
 
@@ -134,8 +141,6 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif mode == "to_here":
         # Pergunta o cap de destino
         await query.message.reply_text("Digite o número do Cap até onde deseja baixar:")
-
-        # Salva contexto para receber o próximo input do usuário
         context.user_data["to_here"] = {
             "source_name": source_name,
             "chapter_index": index,
@@ -222,11 +227,9 @@ def main():
     app.add_handler(CallbackQueryHandler(manga_callback, pattern="^manga"))
     app.add_handler(CallbackQueryHandler(chapter_callback, pattern="^chapter"))
     app.add_handler(CallbackQueryHandler(download_callback, pattern="^download"))
-    app.add_handler(CommandHandler("cancel", lambda u,c: u.message.reply_text("Operação cancelada.")))
-    app.add_handler(MessageHandler(filters=None, callback=handle_text))  # captura input do usuário para "to_here"
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, callback=handle_text))
 
     app.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     main()
