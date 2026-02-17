@@ -1,5 +1,6 @@
-import logging
 import os
+import logging
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -9,16 +10,14 @@ from telegram.ext import (
 )
 from utils.loader import get_all_sources
 from utils.cbz import create_cbz
+from config import BOT_TOKEN, WEBHOOK_URL, PORT
 
 logging.basicConfig(level=logging.INFO)
-
-CHAPTERS_PER_PAGE = 10  # capítulos por página
+CHAPTERS_PER_PAGE = 10
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📚 Manga Bot Online!\nUse: /buscar nome_do_manga"
-    )
+    await update.message.reply_text("📚 Manga Bot Online!\nUse: /buscar nome_do_manga")
 
 # ================= BUSCAR =================
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -30,67 +29,50 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = []
 
     for source_name, source in sources.items():
-        try:
-            results = await source.search(query)
-            for manga in results[:5]:
-                title = manga.get("title") or manga.get("name")
-                url = manga.get("url") or manga.get("slug")
-                callback_id = f"manga|{source_name}|{url}|0"
-                buttons.append([InlineKeyboardButton(f"{title} ({source_name})", callback_data=callback_id)])
-        except Exception:
-            continue
+        results = await source.search(query)
+        for manga in results[:6]:
+            title = manga.get("title") or manga.get("name")
+            url = manga.get("url") or manga.get("slug")
+            buttons.append([InlineKeyboardButton(f"{title} ({source_name})",
+                                                 callback_data=f"manga|{source_name}|{url}|0")])
 
     if not buttons:
         return await update.message.reply_text("Nenhum resultado encontrado.")
 
-    await update.message.reply_text(
-        f"Resultados para: {query}",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
+    await update.message.reply_text(f"🔎 Resultados para: {query}",
+                                    reply_markup=InlineKeyboardMarkup(buttons))
 
-# ================= MANGA COM PAGINAÇÃO =================
+# ================= MANGA (paginação) =================
 async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data.split("|")
-    source_name, manga_url = data[1], data[2]
-    page = int(data[3]) if len(data) > 3 else 0
+    _, source_name, manga_url, page_str = query.data.split("|")
+    page = int(page_str)
     source = get_all_sources()[source_name]
 
-    try:
-        chapters = await source.chapters(manga_url)
-    except Exception:
-        return await query.message.reply_text("Erro ao carregar capítulos.")
-
-    total_chapters = len(chapters)
-    start_idx = page * CHAPTERS_PER_PAGE
-    end_idx = start_idx + CHAPTERS_PER_PAGE
-    page_chapters = chapters[start_idx:end_idx]
+    chapters = await source.chapters(manga_url)
+    total = len(chapters)
+    start = page * CHAPTERS_PER_PAGE
+    end = start + CHAPTERS_PER_PAGE
+    subset = chapters[start:end]
 
     buttons = []
-    for ch in page_chapters:
-        ch_id = ch.get("url") or ch.get("id")
-        cap_number = ch.get("chapter_number") or ch.get("name")
-        buttons.append([InlineKeyboardButton(str(cap_number), callback_data=f"chapter|{source_name}|{ch_id}")])
+    for ch in subset:
+        chap_num = ch.get("chapter_number") or ch.get("name")
+        buttons.append([InlineKeyboardButton(f"Cap {chap_num}", callback_data=f"chapter|{source_name}|{ch.get('url')}")])
 
-    # Navegação entre páginas
-    nav_buttons = []
-    if start_idx > 0:
-        prev_page = page - 1
-        nav_buttons.append(InlineKeyboardButton("« Anterior", callback_data=f"manga|{source_name}|{manga_url}|{prev_page}"))
-    if end_idx < total_chapters:
-        next_page = page + 1
-        nav_buttons.append(InlineKeyboardButton("Próxima »", callback_data=f"manga|{source_name}|{manga_url}|{next_page}"))
+    nav = []
+    if start > 0:
+        nav.append(InlineKeyboardButton("« Anterior", callback_data=f"manga|{source_name}|{manga_url}|{page-1}"))
+    if end < total:
+        nav.append(InlineKeyboardButton("Próxima »", callback_data=f"manga|{source_name}|{manga_url}|{page+1}"))
+    if nav:
+        buttons.append(nav)
 
-    if nav_buttons:
-        buttons.append(nav_buttons)
+    await query.edit_message_text("📖 Selecione o capítulo:",
+                                  reply_markup=InlineKeyboardMarkup(buttons))
 
-    await query.edit_message_text(
-        "Selecione o capítulo:",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-
-# ================= CHAPTER CALLBACK =================
+# ================= CHAPTER =================
 async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -98,89 +80,78 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     source = get_all_sources()[source_name]
 
     chapters = await source.chapters(chapter_id)
-    chapter_info = next((ch for ch in chapters if ch.get("url") == chapter_id or ch.get("id") == chapter_id), None)
+    chapter = next((c for c in chapters if str(c.get("url"))==chapter_id or str(c.get("id"))==chapter_id), None)
+    if not chapter:
+        return await query.message.reply_text("❌ Capítulo não encontrado.")
 
-    if chapter_info:
-        chapter_number = chapter_info.get("chapter_number") or chapter_info.get("name")
-        chapter_name = f"Cap {chapter_number}"
-        manga_title = chapter_info.get("manga_title", "Manga")
-    else:
-        chapter_name = "Capítulo"
-        manga_title = "Manga"
+    chap_num = chapter.get("chapter_number")
+    manga_title = chapter.get("manga_title","Manga")
 
-    # Botões de download
     buttons = [
         [
-            InlineKeyboardButton("📥 Baixar apenas este", callback_data=f"download|{source_name}|{chapter_id}|single"),
+            InlineKeyboardButton("📥 Baixar este", callback_data=f"download|{source_name}|{chapter_id}|single"),
             InlineKeyboardButton("📥 Baixar deste até o fim", callback_data=f"download|{source_name}|{chapter_id}|from_here")
         ],
         [
-            InlineKeyboardButton("📥 Baixar até capítulo X", callback_data=f"download|{source_name}|{chapter_id}|to_here")
+            InlineKeyboardButton("📥 Baixar até Cap X", callback_data=f"download|{source_name}|{chapter_id}|to_here")
         ]
     ]
 
-    await query.edit_message_text(
-        f"{chapter_name} - selecione uma opção de download:",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
+    await query.edit_message_text(f"📦 {manga_title} — Cap {chap_num}\nEscolha o tipo de download:",
+                                  reply_markup=InlineKeyboardMarkup(buttons))
 
-# ================= DOWNLOAD CALLBACK =================
+# ================= DOWNLOAD =================
 async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    _, source_name, chapter_id, mode = query.data.split("|", 3)
+    _, source_name, chapter_id, mode = query.data.split("|")
     source = get_all_sources()[source_name]
 
     chapters = await source.chapters(chapter_id)
-    chapter_index = next((i for i, ch in enumerate(chapters) if ch.get("url") == chapter_id or ch.get("id") == chapter_id), 0)
+    index = next((i for i,c in enumerate(chapters) if str(c.get("url"))==chapter_id or str(c.get("id"))==chapter_id), 0)
 
-    if mode == "single":
-        selected_chapters = [chapters[chapter_index]]
-    elif mode == "from_here":
-        selected_chapters = chapters[chapter_index:]
-    elif mode == "to_here":
-        selected_chapters = chapters[:chapter_index+1]
+    if mode=="single":
+        sel = [chapters[index]]
+    elif mode=="from_here":
+        sel = chapters[index:]
+    elif mode=="to_here":
+        sel = chapters[:index+1]
     else:
-        selected_chapters = [chapters[chapter_index]]
+        sel = [chapters[index]]
 
-    status = await query.message.reply_text(f"📦 Gerando CBZ(s) para {len(selected_chapters)} capítulo(s)...")
+    status = await query.message.reply_text(f"📦 Gerando {len(sel)} CBZ(s)...")
 
-    for ch in selected_chapters:
-        ch_id = ch.get("url") or ch.get("id")
-        chapter_number = ch.get("chapter_number") or ch.get("name")
-        chapter_name = f"Cap {chapter_number}"
-        manga_title = ch.get("manga_title", "Manga")
+    for c in sel:
+        cid = c.get("url") or c.get("id")
+        num = c.get("chapter_number")
+        name = f"Cap {num}"
+        manga_title = c.get("manga_title","Manga")
 
-        try:
-            images = await source.pages(ch_id)
-        except Exception:
-            await query.message.reply_text(f"❌ Falha ao baixar {chapter_name}")
+        imgs = await source.pages(cid)
+        if not imgs:
+            await query.message.reply_text(f"❌ Cap {num} vazio")
             continue
 
-        if not images:
-            await query.message.reply_text(f"❌ {chapter_name} vazio")
-            continue
+        async def progress(i, total):
+            await status.edit_text(f"📦 {manga_title} Cap {num}: {i}/{total} imagens baixadas")
 
-        cbz_path, cbz_name = await create_cbz(images, manga_title, chapter_name)
-        await query.message.reply_document(
-            document=open(cbz_path, "rb"),
-            filename=cbz_name
-        )
-        os.remove(cbz_path)
+        cbz_path, cbz_name = await create_cbz(imgs, manga_title, name, progress)
+        await query.message.reply_document(document=open(cbz_path,"rb"), filename=cbz_name)
 
     await status.delete()
 
-
 # ================= MAIN =================
-def main():
-    app = ApplicationBuilder().token(os.getenv("BOT_TOKEN")).build()
+async def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("buscar", buscar))
     app.add_handler(CallbackQueryHandler(manga_callback, pattern="^manga"))
     app.add_handler(CallbackQueryHandler(chapter_callback, pattern="^chapter"))
     app.add_handler(CallbackQueryHandler(download_callback, pattern="^download"))
-    app.run_polling(drop_pending_updates=True)
 
+    # Webhook
+    await app.bot.set_webhook(WEBHOOK_URL)
+    await app.run_webhook(listen="0.0.0.0", port=PORT, webhook_path="/")
 
-if __name__ == "__main__":
-    main()
+if __name__=="__main__":
+    asyncio.run(main())
