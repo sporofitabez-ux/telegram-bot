@@ -1,6 +1,5 @@
 import logging
 import os
-import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -13,11 +12,13 @@ from utils.cbz import create_cbz
 
 logging.basicConfig(level=logging.INFO)
 
+
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📚 Manga Bot Online!\nUse: /buscar nome_do_manga"
     )
+
 
 # ================= BUSCAR =================
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -47,6 +48,7 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
+
 # ================= MANGA =================
 async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -60,15 +62,16 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await query.message.reply_text("Erro ao carregar capítulos.")
 
     buttons = []
-    for ch in chapters[:20]:
+    for ch in chapters:
         ch_id = ch.get("url") or ch.get("id")
         cap_number = ch.get("chapter_number") or ch.get("name")
         buttons.append([InlineKeyboardButton(str(cap_number), callback_data=f"chapter|{source_name}|{ch_id}")])
 
     await query.edit_message_text(
-        "Selecione o capítulo para baixar:",
+        "Selecione o capítulo:",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
+
 
 # ================= CHAPTER =================
 async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -77,12 +80,12 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _, source_name, chapter_id = query.data.split("|", 2)
     source = get_all_sources()[source_name]
 
-    # Pega capítulo selecionado
     chapters = await source.chapters(chapter_id)
     chapter_info = next((ch for ch in chapters if ch.get("url") == chapter_id or ch.get("id") == chapter_id), None)
 
     if chapter_info:
-        chapter_name = f"Cap {chapter_info.get('chapter_number', chapter_info.get('name',''))}"
+        chapter_number = chapter_info.get("chapter_number") or chapter_info.get("name")
+        chapter_name = f"Cap {chapter_number}"
         manga_title = chapter_info.get("manga_title", "Manga")
     else:
         chapter_name = "Capítulo"
@@ -91,7 +94,7 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Botões de download
     buttons = [
         [
-            InlineKeyboardButton("📥 Baixar este", callback_data=f"download|{source_name}|{chapter_id}|single"),
+            InlineKeyboardButton("📥 Baixar apenas este", callback_data=f"download|{source_name}|{chapter_id}|single"),
             InlineKeyboardButton("📥 Baixar deste até o fim", callback_data=f"download|{source_name}|{chapter_id}|from_here")
         ],
         [
@@ -100,9 +103,10 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     await query.edit_message_text(
-        f"Selecione opção de download para {chapter_name}:",
+        f"{chapter_name} - selecione uma opção de download:",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
+
 
 # ================= DOWNLOAD CALLBACK =================
 async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -127,7 +131,8 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for ch in selected_chapters:
         ch_id = ch.get("url") or ch.get("id")
-        chapter_name = f"Cap {ch.get('chapter_number', ch.get('name',''))}"
+        chapter_number = ch.get("chapter_number") or ch.get("name")
+        chapter_name = f"Cap {chapter_number}"
         manga_title = ch.get("manga_title", "Manga")
 
         try:
