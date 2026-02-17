@@ -68,7 +68,7 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chapters = await source.chapters(slug)
 
-    # salva na sessão
+    # salva na sessão do usuário
     context.user_data["chapters"] = chapters
     context.user_data["slug"] = slug
 
@@ -88,6 +88,7 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         ])
 
+    # navegação
     nav = []
     if start > 0:
         nav.append(
@@ -117,13 +118,9 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["selected_index"] = index
 
     buttons = [
-        [
-            InlineKeyboardButton("📥 Baixar este", callback_data="d|single"),
-            InlineKeyboardButton("📥 Baixar deste até o fim", callback_data="d|from")
-        ],
-        [
-            InlineKeyboardButton("📥 Baixar até aqui", callback_data="d|to")
-        ]
+        [InlineKeyboardButton("📥 Baixar este", callback_data="d|single")],
+        [InlineKeyboardButton("📥 Baixar deste até o fim", callback_data="d|from")],
+        [InlineKeyboardButton("📥 Baixar até aqui", callback_data="d|to")]
     ]
 
     await query.edit_message_text(
