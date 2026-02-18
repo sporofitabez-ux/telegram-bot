@@ -17,7 +17,7 @@ class Mangaflix:
         for item in data.get("data", []):
             results.append({
                 "title": item.get("name"),
-                "url": item.get("_id"),
+                "url": item.get("_id")
             })
         return results
 
@@ -30,17 +30,14 @@ class Mangaflix:
             data = r.json()
 
         chapters = []
-        manga_title = data.get("data", {}).get("name", "Manga")
-
         for ch in data.get("data", {}).get("chapters", []):
             chapters.append({
                 "name": f"Capítulo {ch.get('number')}",
                 "chapter_number": ch.get("number"),
-                "url": ch.get("_id"),
-                "manga_title": manga_title
+                "url": ch.get("_id")
             })
 
-        # Ordena capítulos do mais recente para o mais antigo
+        # Ordena capítulos do mais recente
         chapters.sort(key=lambda x: float(x.get("chapter_number") or 0), reverse=True)
         return chapters
 
