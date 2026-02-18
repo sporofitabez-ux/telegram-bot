@@ -1,6 +1,6 @@
 import httpx
 
-class ToonBr:
+class ToonBrSource:
     name = "ToonBr"
     base_url = "https://beta.toonbr.com"
     api_url = "https://api.toonbr.com"
@@ -12,7 +12,12 @@ class ToonBr:
             r = await client.get(url)
             r.raise_for_status()
             data = r.json()
-        results = [{"title": m.get("title"), "url": m.get("slug")} for m in data.get("data", [])]
+        results = []
+        for manga in data.get("data", []):
+            results.append({
+                "title": manga.get("title"),
+                "url": manga.get("slug"),
+            })
         return results
 
     async def chapters(self, manga_slug: str):
@@ -21,16 +26,17 @@ class ToonBr:
             r = await client.get(url)
             r.raise_for_status()
             data = r.json()
+
         manga_title = data.get("title", "Manga")
-        chapters = [
-            {
+        chapters = []
+        for ch in data.get("chapters", []):
+            chapters.append({
                 "name": ch.get("name"),
                 "chapter_number": ch.get("chapterNumber"),
                 "url": ch.get("id"),
-                "manga_title": manga_title,
-            }
-            for ch in data.get("chapters", [])
-        ]
+                "manga_title": manga_title
+            })
+
         chapters.sort(key=lambda x: float(x.get("chapter_number") or 0), reverse=True)
         return chapters
 
@@ -40,4 +46,5 @@ class ToonBr:
             r = await client.get(url)
             r.raise_for_status()
             data = r.json()
-        return [f"{self.cdn_url}{p['imageUrl']}" for p in data.get("pages", []) if p.get("imageUrl")]
+        pages = [f"{self.cdn_url}{p['imageUrl']}" for p in data.get("pages", []) if p.get("imageUrl")]
+        return pages
