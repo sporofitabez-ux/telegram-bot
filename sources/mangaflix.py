@@ -1,70 +1,68 @@
-import httpx
-import os
+# sources/mangaflix.py
+import aiohttp
+import asyncio
 
-class Mangaflix:
-    name = "Mangaflix"
-    base_url = "https://mangaflix.net"
-    api_url = "https://api.mangaflix.net/v1"
+class MangaFlixSource:
+    BASE_URL = "https://api.mangaflix.net/v1"
+
+    def __init__(self):
+        self.session = None
+
+    async def _get_session(self):
+        if self.session is None:
+            self.session = aiohttp.ClientSession()
+        return self.session
 
     # ================= SEARCH =================
     async def search(self, query: str):
-        url = f"{self.api_url}/search/mangas?query={query}&selected_language=pt-br"
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-            data = r.json()
-
-        results = []
-        for item in data.get("data", []):
-            results.append({
-                "title": item.get("name", "Sem título"),
-                "url": item.get("_id")
-            })
-        return results
+        session = await self._get_session()
+        url = f"{self.BASE_URL}/search/mangas?query={query}&selected_language=pt-br"
+        try:
+            async with session.get(url) as resp:
+                data = await resp.json()
+                results = []
+                for item in data.get("data", []):
+                    results.append({
+                        "title": item.get("name"),
+                        "url": f"/br/manga/{item.get('_id')}"
+                    })
+                return results
+        except Exception:
+            return []
 
     # ================= CHAPTERS =================
     async def chapters(self, manga_id: str):
-        url = f"{self.api_url}/mangas/{manga_id}"
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-            data = r.json()
-
-        chapters = []
-        for ch in data.get("data", {}).get("chapters", []):
-            chapters.append({
-                "name": f"Capítulo {ch.get('number', '?')}",
-                "chapter_number": ch.get("number", 0),
-                "url": ch.get("_id")
-            })
-
-        chapters.sort(key=lambda x: float(x.get("chapter_number") or 0), reverse=True)
-        return chapters
+        session = await self._get_session()
+        mid = manga_id.split("/")[-1]
+        url = f"{self.BASE_URL}/mangas/{mid}"
+        try:
+            async with session.get(url) as resp:
+                data = await resp.json()
+                chapters = []
+                for ch in data.get("data", {}).get("chapters", []):
+                    chapters.append({
+                        "chapter_number": ch.get("number"),
+                        "url": f"/br/manga/{ch.get('_id')}",
+                        "manga_title": data.get("data", {}).get("name", "Manga")
+                    })
+                return chapters
+        except Exception:
+            return []
 
     # ================= PAGES =================
-    async def pages(self, chapter_id: str, save_dir: str = "downloads"):
-        url = f"{self.api_url}/chapters/{chapter_id}?selected_language=pt-br"
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-            data = r.json()
+    async def pages(self, chapter_id: str):
+        session = await self._get_session()
+        cid = chapter_id.split("/")[-1]
+        url = f"{self.BASE_URL}/chapters/{cid}?selected_language=pt-br"
+        try:
+            async with session.get(url) as resp:
+                data = await resp.json()
+                images = [img.get("default_url") for img in data.get("data", {}).get("images", [])]
+                return images
+        except Exception:
+            return []
 
-        pages = []
-        os.makedirs(save_dir, exist_ok=True)
-
-        for idx, img in enumerate(data.get("data", {}).get("images", []), start=1):
-            img_url = img.get("default_url")
-            if not img_url:
-                continue
-
-            # baixa imagem de forma síncrona para evitar problemas com aiofiles
-            file_path = os.path.join(save_dir, f"{chapter_id}_{idx}.jpg")
-            try:
-                resp = httpx.get(img_url, timeout=30.0)
-                with open(file_path, "wb") as f:
-                    f.write(resp.content)
-                pages.append(file_path)
-            except Exception as e:
-                print(f"Erro ao baixar {img_url}: {e}")
-
-        return pages
+    async def close(self):
+        if self.session:
+            await self.session.close()
+            self.session = None
