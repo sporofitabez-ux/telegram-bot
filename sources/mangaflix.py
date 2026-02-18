@@ -9,8 +9,10 @@ class MangaFlixSource:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "pt-BR,pt;q=0.9",
         "Origin": base_url,
         "Referer": base_url + "/",
+        "Connection": "keep-alive"
     }
 
     timeout = httpx.Timeout(60.0)
@@ -29,17 +31,20 @@ class MangaFlixSource:
 
         async with httpx.AsyncClient(
             headers=self.headers,
-            timeout=self.timeout
+            timeout=self.timeout,
+            http2=False  # força HTTP/1.1
         ) as client:
+
             r = await client.get(url, params=params)
 
             if r.status_code != 200:
-                print("MangaFlix search erro:", r.status_code, r.text)
+                print("Search error:", r.status_code, r.text)
                 return []
 
             data = r.json()
 
         results = []
+
         for item in data.get("data", []):
             results.append({
                 "title": item.get("name"),
@@ -54,12 +59,14 @@ class MangaFlixSource:
 
         async with httpx.AsyncClient(
             headers=self.headers,
-            timeout=self.timeout
+            timeout=self.timeout,
+            http2=False
         ) as client:
+
             r = await client.get(url)
 
             if r.status_code != 200:
-                print("MangaFlix chapters erro:", r.status_code, r.text)
+                print("Chapters error:", r.status_code, r.text)
                 return []
 
             data = r.json()
@@ -77,11 +84,6 @@ class MangaFlixSource:
                 "manga_title": manga_title
             })
 
-        chapters.sort(
-            key=lambda x: float(x.get("chapter_number") or 0),
-            reverse=True
-        )
-
         return chapters
 
     # ================= PAGES =================
@@ -94,12 +96,14 @@ class MangaFlixSource:
 
         async with httpx.AsyncClient(
             headers=self.headers,
-            timeout=self.timeout
+            timeout=self.timeout,
+            http2=False
         ) as client:
+
             r = await client.get(url, params=params)
 
             if r.status_code != 200:
-                print("MangaFlix pages erro:", r.status_code, r.text)
+                print("Pages error:", r.status_code, r.text)
                 return []
 
             data = r.json()
