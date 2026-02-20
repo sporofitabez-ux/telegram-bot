@@ -28,21 +28,21 @@ def get_sessions(context):
         context.chat_data["sessions"] = {}
     return context.chat_data["sessions"]
 
-def get_session(context, msg_id):
-    return get_sessions(context).setdefault(str(msg_id), {})
+def get_session(context, message_id):
+    return get_sessions(context).setdefault(str(message_id), {})
 
-def group_only(update: Update):
-    return update.effective_chat.type != "private"
+def is_group(update: Update):
+    return update.effective_chat.type in ["group", "supergroup"]
 
-# ================= YUKI =================
+# ================= COMANDO /Yuki =================
 async def yuki(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not group_only(update):
+    if not is_group(update):
         return await update.message.reply_text("Use o bot no grupo.")
-    await update.message.reply_text("🌸 Yuki pronta!\nUse /search nome_do_manga")
+    await update.message.reply_text("🌸 Yuki online!\nUse /search nome_do_manga")
 
-# ================= SEARCH =================
+# ================= COMANDO /search =================
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not group_only(update):
+    if not is_group(update):
         return
 
     if not context.args:
@@ -55,6 +55,9 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for source_name, source in sources.items():
         try:
             results = await source.search(query_text)
+            if not results:
+                continue
+
             for manga in results[:6]:
                 buttons.append([
                     InlineKeyboardButton(
@@ -62,8 +65,11 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         callback_data=f"m|{source_name}|{manga['url']}"
                     )
                 ])
-        except:
-            pass
+        except Exception as e:
+            logging.warning(f"Erro na fonte {source_name}: {e}")
+
+    if not buttons:
+        return await update.message.reply_text("❌ Nenhum resultado encontrado.")
 
     msg = await update.message.reply_text(
         f"🔎 Resultados para: {query_text}",
@@ -74,7 +80,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session["owner"] = update.effective_user.id
     session["owner_name"] = update.effective_user.first_name
 
-# ================= DONO =================
+# ================= PROTEÇÃO DONO =================
 async def check_owner(update, context):
     query = update.callback_query
     session = get_session(context, query.message.message_id)
@@ -97,6 +103,9 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     source = get_all_sources()[source_name]
     chapters = await source.chapters(manga_id)
+
+    if not chapters:
+        return await query.message.reply_text("❌ Não foi possível carregar capítulos.")
 
     session["chapters"] = chapters
     session["source"] = source
@@ -168,7 +177,7 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔢 Baixar até cap X", callback_data="d|until")]
     ]
 
-    await query.edit_message_text("Escolha:", reply_markup=InlineKeyboardMarkup(buttons))
+    await query.edit_message_text("Escolha o tipo de download:", reply_markup=InlineKeyboardMarkup(buttons))
 
 # ================= DOWNLOAD =================
 async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -271,7 +280,7 @@ def main():
     loop.create_task(worker(app))
     loop.create_task(worker(app))
 
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
