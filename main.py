@@ -8,9 +8,6 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
-    ConversationHandler,
-    MessageHandler,
-    filters,
 )
 
 from utils.loader import get_all_sources
@@ -19,12 +16,12 @@ from utils.cbz import create_cbz
 logging.basicConfig(level=logging.INFO)
 
 CHAPTERS_PER_PAGE = 10
-WAITING_FOR_CAP = 1
 MAX_CHAPTERS_PER_REQUEST = 50
 
 # ================= FILA GLOBAL =================
 download_queue = asyncio.Queue()
 current_download = None
+
 
 # ================= SESSÕES =================
 def get_sessions(context):
@@ -32,11 +29,14 @@ def get_sessions(context):
         context.chat_data["sessions"] = {}
     return context.chat_data["sessions"]
 
+
 def get_session(context, message_id):
     return get_sessions(context).setdefault(str(message_id), {})
 
+
 def block_private(update: Update):
     return update.effective_chat.type == "private"
+
 
 # ================= WORKER =================
 async def download_worker():
@@ -76,6 +76,12 @@ async def download_worker():
         current_download = None
         download_queue.task_done()
 
+
+# ================= POST INIT =================
+async def post_init(application):
+    application.create_task(download_worker())
+
+
 # ================= COMANDO YUKI =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if block_private(update):
@@ -86,6 +92,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         "🌸 Yuki Manga Bot Online!\n\nUse:\n/search nome_do_manga"
     )
+
 
 # ================= STATUS =================
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -100,6 +107,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text += f"📦 Na fila: {download_queue.qsize()}"
 
     await update.message.reply_text(text)
+
 
 # ================= SEARCH =================
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -121,6 +129,7 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for manga in results[:6]:
                 title = manga.get("title")
                 url = manga.get("url")
+
                 buttons.append([
                     InlineKeyboardButton(
                         f"{title} ({source_name})",
@@ -142,6 +151,7 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     session = get_session(context, msg.message_id)
     session["owner_id"] = update.effective_user.id
+
 
 # ================= LISTAR CAPÍTULOS =================
 async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -166,8 +176,12 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = []
     for i, ch in enumerate(subset, start=start):
         num = ch.get("chapter_number") or ch.get("name")
+
         buttons.append([
-            InlineKeyboardButton(f"Cap {num}", callback_data=f"c|{i}")
+            InlineKeyboardButton(
+                f"Cap {num}",
+                callback_data=f"c|{i}"
+            )
         ])
 
     await query.edit_message_text(
@@ -175,15 +189,17 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
+
 # ================= DOWNLOAD =================
 async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     session = get_session(context, query.message.message_id)
-    _, index_str = query.data.split("|")
 
+    _, index_str = query.data.split("|")
     index = int(index_str)
+
     chapters = session["chapters"]
     source_name = session["source_name"]
 
@@ -204,7 +220,8 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Capítulos: {len(selected)}"
     )
 
-# ================= ENVIAR CAP =================
+
+# ================= ENVIAR CAPÍTULO =================
 async def send_chapter(message, source, chapter):
     cid = chapter.get("url")
     num = chapter.get("chapter_number")
@@ -223,9 +240,15 @@ async def send_chapter(message, source, chapter):
 
     os.remove(cbz_path)
 
+
 # ================= MAIN =================
 def main():
-    app = ApplicationBuilder().token(os.getenv("BOT_TOKEN")).build()
+    app = (
+        ApplicationBuilder()
+        .token(os.getenv("BOT_TOKEN"))
+        .post_init(post_init)
+        .build()
+    )
 
     app.add_handler(CommandHandler("Yuki", start))
     app.add_handler(CommandHandler("search", buscar))
@@ -234,9 +257,8 @@ def main():
     app.add_handler(CallbackQueryHandler(manga_callback, pattern="^m\\|"))
     app.add_handler(CallbackQueryHandler(chapter_callback, pattern="^c\\|"))
 
-    app.create_task(download_worker())
-
     app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
