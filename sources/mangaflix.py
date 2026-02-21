@@ -108,10 +108,25 @@ class MangaFlixSource:
 
             data = r.json()
 
-        images = data.get("data", {}).get("images", [])
+        chapter_data = data.get("data", {})
 
-        return [
-            img.get("default_url")
-            for img in images
-            if img.get("default_url")
-        ]
+        cdn = chapter_data.get("cdn")
+        images = chapter_data.get("images", [])
+
+        if not cdn or not images:
+            return []
+
+        pages = []
+
+        for img in images:
+            path = img.get("path") or img.get("url") or img.get("image")
+            if not path:
+                continue
+
+            if path.startswith("http"):
+                pages.append(path)
+            else:
+                pages.append(f"{cdn}/{path}")
+
+        return pages
+                ]
