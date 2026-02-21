@@ -1,48 +1,23 @@
 import httpx
 import asyncio
-import os
-import tempfile
-
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0",
-    "Referer": "https://mangaflix.net/",
-    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
-}
-
 
 async def fetch_image(client, url):
     try:
-        r = await client.get(url, headers=HEADERS, timeout=60.0)
-        if r.status_code != 200:
-            print("Falha imagem:", r.status_code, url)
-            return None
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        }
+        r = await client.get(url, headers=headers, timeout=30.0)
+        r.raise_for_status()
         return r.content
     except Exception as e:
-        print("Erro imagem:", e, url)
+        print(f"Erro ao baixar {url}: {e}")
         return None
 
-
-async def download_chapter(source, chapter):
-    # pega páginas do source
-    pages = await source.pages(chapter["url"])
-
-    if not pages:
-        raise Exception("Sem páginas")
-
-    async with httpx.AsyncClient(http2=True, timeout=60.0) as client:
-        tasks = [fetch_image(client, url) for url in pages]
-        images = await asyncio.gather(*tasks)
-
-    images = [img for img in images if img]
-
-    if not images:
-        raise Exception("Nenhuma imagem baixada")
-
-    folder = tempfile.mkdtemp(prefix="manga_")
-
-    for i, img in enumerate(images):
-        with open(os.path.join(folder, f"{i:03}.jpg"), "wb") as f:
-            f.write(img)
-
-    return folder
+async def download_images(urls):
+    async with httpx.AsyncClient(http2=True, timeout=30.0) as client:
+        tasks = [fetch_image(client, url) for url in urls]
+        results = await asyncio.gather(*tasks)
+        downloaded = [img for img in results if img]
+        if not downloaded:
+            print("Nenhuma imagem foi baixada")
+        return downloaded
