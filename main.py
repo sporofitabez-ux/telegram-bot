@@ -173,10 +173,17 @@ async def worker(app: Application):
 # =========================
 async def bb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+    print("Comando recebido!")  # DEBUG (vai aparecer no Railway)
+
+    message = update.effective_message
+
     if not context.args:
+        await message.reply_text("Use: /bb nome_do_manga")
         return
 
     nome = " ".join(context.args)
+
+    await message.reply_text("🔎 Buscando...")
 
     titulo, sinopse, generos, capa = await buscar_anilist(nome)
 
@@ -196,6 +203,10 @@ async def bb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print("Erro fonte:", e)
 
+    if not keyboard:
+        await message.reply_text("❌ Nenhum resultado encontrado.")
+        return
+
     texto = f"""
 <b>{html.escape(titulo)}</b>
 
@@ -205,14 +216,12 @@ async def bb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 {html.escape(sinopse)}
 """
 
-    msg = await update.message.reply_photo(
+    await message.reply_photo(
         photo=capa,
         caption=texto,
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
-
-    asyncio.create_task(auto_delete(context, msg.chat_id, msg.message_id))
 
 
 # =========================
