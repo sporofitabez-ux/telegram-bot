@@ -1,8 +1,6 @@
 import os
 import asyncio
 import logging
-import time
-import httpx
 
 from telegram import (
     Update,
@@ -17,6 +15,8 @@ from telegram.ext import (
     ContextTypes,
 )
 
+from telegram.error import RetryAfter, TimedOut, NetworkError
+
 from utils.loader import get_all_sources
 from utils.cbz import create_cbz
 from utils.queue_manager import (
@@ -25,140 +25,81 @@ from utils.queue_manager import (
     remove_job,
     queue_size,
 )
+from utils.anilist import search_anilist
 
 logging.basicConfig(level=logging.INFO)
 
 DOWNLOAD_SEMAPHORE = asyncio.Semaphore(2)
 CHAPTERS_PER_PAGE = 10
-USER_COOLDOWN = {}
-COOLDOWN_TIME = 4
+
+SEARCH_CACHE = {}
+BOT_MESSAGES = {}
 
 
 # =====================================================
-# TRADUÇÃO SIMPLES PARA PT-BR
+# LIMPAR RASTROS DO BOT
 # =====================================================
-async def translate_to_pt(text):
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.get(
-                "https://translate.googleapis.com/translate_a/single",
-                params={
-                    "client": "gtx",
-                    "sl": "auto",
-                    "tl": "pt",
-                    "dt": "t",
-                    "q": text
-                }
-            )
-        result = r.json()
-        return "".join([item[0] for item in result[0]])
-    except:
-        return text
+async def clean_bot_messages(chat_id, context):
+    msgs = BOT_MESSAGES.get(chat_id, [])
+
+    for mid in msgs:
+        try:
+            await context.bot.delete_message(chat_id, mid)
+        except:
+            pass
+
+    BOT_MESSAGES[chat_id] = []
+
+
+def register_bot_message(chat_id, message):
+    BOT_MESSAGES.setdefault(chat_id, []).append(message.message_id)
 
 
 # =====================================================
-# ANI LIST
-# =====================================================
-async def fetch_anilist_info(title):
-
-    query = """
-    query ($search: String) {
-      Media(search: $search, type: MANGA) {
-        description(asHtml: false)
-        status
-        genres
-        coverImage {
-          extraLarge
-        }
-      }
-    }
-    """
-
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            "https://graphql.anilist.co",
-            json={"query": query, "variables": {"search": title}},
-        )
-
-    data = response.json().get("data", {}).get("Media")
-    if not data:
-        return None
-
-    status_map = {
-        "FINISHED": "Finalizado",
-        "RELEASING": "Em lançamento",
-        "NOT_YET_RELEASED": "Não lançado",
-        "CANCELLED": "Cancelado",
-    }
-
-    synopsis = data.get("description") or "Sem descrição."
-    synopsis = synopsis[:1200]
-
-    # TRADUZ
-    synopsis_pt = await translate_to_pt(synopsis)
-
-    return {
-        "cover": data["coverImage"]["extraLarge"],
-        "status": status_map.get(data["status"], "Desconhecido"),
-        "genres": ", ".join(data["genres"]),
-        "synopsis": synopsis_pt
-    }
-
-
-# =====================================================
-# ENVIO DO CAPÍTULO
+# ENVIO CAPÍTULO
 # =====================================================
 async def send_chapter(message, source, chapter):
 
     async with DOWNLOAD_SEMAPHORE:
 
-        cid = chapter.get("url")
-        num = chapter.get("chapter_number")
-        manga_title = chapter.get("manga_title", "Manga")
+        imgs = await source.pages(chapter["url"])
+        if not imgs:
+            return
 
-        try:
-            imgs = await source.pages(cid)
-            if not imgs:
-                return
+        cbz_buffer, cbz_name = await create_cbz(
+            imgs,
+            chapter.get("manga_title", "Manga"),
+            f"Cap_{chapter.get('chapter_number')}",
+        )
 
-            cbz_buffer, cbz_name = await create_cbz(
-                imgs,
-                manga_title,
-                f"Cap_{num}"
-            )
-
-            await message.reply_document(
-                document=cbz_buffer,
-                filename=cbz_name
-            )
-
-        except Exception as e:
-            print("Erro envio:", e)
-
-        finally:
+        while True:
             try:
-                cbz_buffer.close()
-            except:
-                pass
+                await message.reply_document(cbz_buffer, filename=cbz_name)
+                break
+            except RetryAfter as e:
+                await asyncio.sleep(int(e.retry_after) + 2)
+            except (TimedOut, NetworkError):
+                await asyncio.sleep(5)
+
+        cbz_buffer.close()
 
 
 # =====================================================
 # WORKER
 # =====================================================
-async def download_worker():
+async def worker():
+    print("✅ Worker iniciado")
+
     while True:
         job = await DOWNLOAD_QUEUE.get()
 
-        try:
-            await send_chapter(
-                job["message"],
-                job["source"],
-                job["chapter"],
-            )
-            await asyncio.sleep(1.5)
-        except Exception as e:
-            print("Erro worker:", e)
+        await send_chapter(
+            job["message"],
+            job["source"],
+            job["chapter"],
+        )
 
+        await asyncio.sleep(2)
         remove_job()
         DOWNLOAD_QUEUE.task_done()
 
@@ -168,178 +109,173 @@ async def download_worker():
 # =====================================================
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    if not context.args:
-        return await update.message.reply_text("Use: /buscar nome")
+    chat_id = update.effective_chat.id
+    await clean_bot_messages(chat_id, context)
 
-    query_text = " ".join(context.args)
-    sources = get_all_sources()
+    query = " ".join(context.args)
 
-    await update.message.reply_text(f"🔎 Buscando «{query_text}»")
+    msg = await update.message.reply_text("🔎 Buscando...")
+    register_bot_message(chat_id, msg)
 
-    for source_name, source in sources.items():
+    buttons = []
+    cache = []
+
+    for source_name, source in get_all_sources().items():
         try:
-            results = await source.search(query_text)
-            if not results:
-                continue
+            results = await source.search(query)
 
-            manga = results[0]
-            title = manga.get("title")
-            url = manga.get("url")
+            for manga in results[:5]:
+                cache.append({
+                    "source": source_name,
+                    "title": manga["title"],
+                    "url": manga["url"],
+                })
 
-            chapters = await source.chapters(url)
-            chapters.sort(key=lambda x: float(x.get("chapter_number", 0)))
+                buttons.append([
+                    InlineKeyboardButton(
+                        f"{manga['title']} ({source_name})",
+                        callback_data=f"select|{len(cache)-1}",
+                    )
+                ])
+        except:
+            pass
 
-            context.user_data["chapters"] = chapters
-            context.user_data["source"] = source
-            context.user_data["page"] = 0
+    if not buttons:
+        await msg.edit_text("❌ Nenhum resultado encontrado.")
+        return
 
-            info = await fetch_anilist_info(title)
+    SEARCH_CACHE[chat_id] = cache
 
-            if info:
-                caption = f"""📚 «{title}»
-
-Status » {info['status']}
-Gênero: {info['genres']}
-
-Sinopse:
-{info['synopsis']}
-
-🔗 @animesmangas308"""
-
-                await update.message.reply_photo(
-                    photo=info["cover"],
-                    caption=caption
-                )
-
-            await send_chapter_list(update.message, context)
-            return
-
-        except Exception as e:
-            print("Erro:", e)
-
-    await update.message.reply_text("❌ Nenhum resultado encontrado.")
-
-
-# =====================================================
-# LISTA PAGINADA (SEM DELETAR)
-# =====================================================
-async def send_chapter_list(message, context):
-
-    chapters = context.user_data["chapters"]
-    page = context.user_data["page"]
-
-    start = page * CHAPTERS_PER_PAGE
-    end = start + CHAPTERS_PER_PAGE
-
-    keyboard = []
-
-    for ch in chapters[start:end]:
-        num = ch.get("chapter_number")
-        keyboard.append([
-            InlineKeyboardButton(
-                f"📖 Capítulo {num}",
-                callback_data=f"select_{num}"
-            )
-        ])
-
-    nav = []
-    if start > 0:
-        nav.append(InlineKeyboardButton("⬅️", callback_data="prev"))
-    if end < len(chapters):
-        nav.append(InlineKeyboardButton("➡️", callback_data="next"))
-
-    if nav:
-        keyboard.append(nav)
-
-    await message.reply_text(
-        "Escolha o capítulo:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+    await msg.edit_text(
+        "📚 Escolha o mangá:",
+        reply_markup=InlineKeyboardMarkup(buttons),
     )
 
 
 # =====================================================
-# CALLBACKS
+# SELECIONAR MANGÁ
 # =====================================================
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def select_manga(update, context):
 
     query = update.callback_query
     await query.answer()
 
-    chapters = context.user_data["chapters"]
-    source = context.user_data["source"]
+    chat_id = query.message.chat_id
 
-    # PAGINAÇÃO ESTÁVEL
-    if query.data == "next":
-        context.user_data["page"] += 1
-        await query.message.edit_reply_markup(None)
-        await send_chapter_list(query.message, context)
-        return
+    data = SEARCH_CACHE[chat_id][int(query.data.split("|")[1])]
+    source = get_all_sources()[data["source"]]
 
-    if query.data == "prev":
-        context.user_data["page"] -= 1
-        await query.message.edit_reply_markup(None)
-        await send_chapter_list(query.message, context)
-        return
+    info = await search_anilist(data["title"])
+    chapters = await source.chapters(data["url"])
 
-    # SELEÇÃO
-    if query.data.startswith("select_"):
-        number = query.data.split("_")[1]
-        context.user_data["selected"] = float(number)
+    context.chat_data["chapters"] = chapters
+    context.chat_data["source"] = source
 
-        keyboard = [
-            [InlineKeyboardButton("🔥 Baixar este", callback_data="one")],
-            [InlineKeyboardButton("⬇️ Baixar até aqui", callback_data="upto")],
-            [InlineKeyboardButton("📥 Baixar todos", callback_data="all")]
+    text = (
+        f"📖 *{info['title']}*\n\n"
+        f"🎭 {info['genres']}\n\n"
+        f"{info['synopsis']}"
+    )
+
+    buttons = [
+        [InlineKeyboardButton("📥 Baixar tudo", callback_data="download_all")],
+        [InlineKeyboardButton("📖 Ver capítulos", callback_data="chapters|0")],
+    ]
+
+    await query.message.reply_photo(
+        info["cover"],
+        caption=text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+# =====================================================
+# PAGINAÇÃO CAPÍTULOS
+# =====================================================
+async def show_chapters(update, context):
+
+    query = update.callback_query
+    await query.answer()
+
+    page = int(query.data.split("|")[1])
+    chapters = context.chat_data["chapters"]
+
+    start = page * CHAPTERS_PER_PAGE
+    end = start + CHAPTERS_PER_PAGE
+
+    subset = chapters[start:end]
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                f"Cap {c.get('chapter_number')}",
+                callback_data=f"download_one|{start+i}",
+            )
         ]
+        for i, c in enumerate(subset)
+    ]
 
-        await query.message.reply_text(
-            f"Capítulo {number} selecionado:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return
+    nav = []
+    if start > 0:
+        nav.append(InlineKeyboardButton("◀", callback_data=f"chapters|{page-1}"))
+    if end < len(chapters):
+        nav.append(InlineKeyboardButton("▶", callback_data=f"chapters|{page+1}"))
 
-    # BAIXAR UM
-    if query.data == "one":
-        number = context.user_data["selected"]
+    if nav:
+        buttons.append(nav)
 
-        for ch in chapters:
-            if float(ch.get("chapter_number", 0)) == number:
-                await add_job({
-                    "message": query.message,
-                    "source": source,
-                    "chapter": ch,
-                })
-                break
+    await query.message.edit_text(
+        "📖 Escolha capítulo:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
 
-        await query.message.reply_text("✅ Adicionado à fila.")
-        return
 
-    # BAIXAR ATÉ
-    if query.data == "upto":
-        number = context.user_data["selected"]
+# =====================================================
+# DOWNLOADS
+# =====================================================
+async def download_all(update, context):
+    query = update.callback_query
+    await query.answer()
 
-        for ch in chapters:
-            if float(ch.get("chapter_number", 0)) <= number:
-                await add_job({
-                    "message": query.message,
-                    "source": source,
-                    "chapter": ch,
-                })
+    chapters = context.chat_data["chapters"]
+    source = context.chat_data["source"]
 
-        await query.message.reply_text("⬇️ Capítulos adicionados até aqui.")
-        return
+    for ch in chapters:
+        await add_job({
+            "message": query.message,
+            "source": source,
+            "chapter": ch,
+            "meta": {},
+        })
 
-    # BAIXAR TODOS (AGORA CORRETO)
-    if query.data == "all":
-        for ch in chapters:
-            await add_job({
-                "message": query.message,
-                "source": source,
-                "chapter": ch,
-            })
+    await query.message.reply_text("✅ Todos capítulos adicionados à fila.")
 
-        await query.message.reply_text("📥 Todos capítulos adicionados na fila.")
-        return
+
+async def download_one(update, context):
+    query = update.callback_query
+    await query.answer()
+
+    index = int(query.data.split("|")[1])
+
+    ch = context.chat_data["chapters"][index]
+    source = context.chat_data["source"]
+
+    await add_job({
+        "message": query.message,
+        "source": source,
+        "chapter": ch,
+        "meta": {},
+    })
+
+    await query.message.reply_text("✅ Capítulo adicionado à fila.")
+
+
+# =====================================================
+# STATUS
+# =====================================================
+async def status(update, context):
+    await update.message.reply_text(f"📦 Fila: {queue_size()}")
 
 
 # =====================================================
@@ -347,18 +283,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =====================================================
 def main():
 
-    app = ApplicationBuilder().token(
-        os.getenv("BOT_TOKEN")
-    ).build()
+    app = ApplicationBuilder().token(os.getenv("BOT_TOKEN")).build()
 
     app.add_handler(CommandHandler("buscar", buscar))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CommandHandler("status", status))
+
+    app.add_handler(CallbackQueryHandler(select_manga, pattern="^select"))
+    app.add_handler(CallbackQueryHandler(show_chapters, pattern="^chapters"))
+    app.add_handler(CallbackQueryHandler(download_all, pattern="download_all"))
+    app.add_handler(CallbackQueryHandler(download_one, pattern="download_one"))
 
     async def startup(app):
-        asyncio.create_task(download_worker())
+        asyncio.create_task(worker())
 
     app.post_init = startup
 
+    print("🤖 Bot profissional iniciado")
     app.run_polling(drop_pending_updates=True)
 
 
