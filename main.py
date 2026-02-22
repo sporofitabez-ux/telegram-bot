@@ -18,13 +18,13 @@ from telegram.ext import (
 
 from config import BOT_TOKEN
 
-# ===== IMPORTA DIRETO AS FONTES (SEM LOADER) =====
+# ===== IMPORTA DIRETO AS FONTES =====
 from sources.toonbr import ToonBrSource
 from sources.mangaflix import MangaFlixSource
 
 
 # =========================
-# FONTES (SUBSTITUI LOADER.PY)
+# FONTES
 # =========================
 SOURCES = {
     "ToonBr": ToonBrSource(),
@@ -36,7 +36,7 @@ def get_all_sources():
 
 
 # =========================
-# CONFIG GOD
+# CONFIG
 # =========================
 DELETE_DELAY = 25
 MAX_USER_JOBS = 2
@@ -111,7 +111,7 @@ async def buscar_anilist(nome):
     }
     """
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=20) as client:
         r = await client.post(
             "https://graphql.anilist.co",
             json={"query": query, "variables": {"search": nome}}
@@ -135,9 +135,9 @@ async def buscar_anilist(nome):
 
 
 # =========================
-# WORKER (FILA PROFISSIONAL)
+# WORKER (FILA)
 # =========================
-async def worker(app):
+async def worker(app: Application):
 
     while True:
         job = await job_queue.get()
@@ -146,12 +146,13 @@ async def worker(app):
             bot = app.bot
             chat_id = job["chat_id"]
             source = job["source"]
-            chapter = job["chapter"]
+            chapter_url = job["chapter_url"]
 
-            images = await source.pages(chapter["url"])
+            images = await source.pages(chapter_url)
 
             for i in range(0, len(images), 8):
                 media = [InputMediaPhoto(img) for img in images[i:i+8]]
+
                 msgs = await bot.send_media_group(chat_id, media)
 
                 for m in msgs:
@@ -192,8 +193,8 @@ async def bb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         callback_data=f"select|{source_name}|{manga['url']}|{manga['title']}"
                     )
                 ])
-        except:
-            pass
+        except Exception as e:
+            print("Erro fonte:", e)
 
     texto = f"""
 <b>{html.escape(titulo)}</b>
@@ -205,7 +206,7 @@ async def bb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
 
     msg = await update.message.reply_photo(
-        capa,
+        photo=capa,
         caption=texto,
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -254,9 +255,8 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = q.from_user.id
 
     if user_jobs[user] >= MAX_USER_JOBS:
-        return await q.message.reply_text(
-            "⚠️ Aguarde terminar seus downloads atuais."
-        )
+        await q.message.reply_text("⚠️ Aguarde terminar seus downloads.")
+        return
 
     _, source_name, url, title = q.data.split("|", 3)
     source = get_all_sources()[source_name]
@@ -266,7 +266,7 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await job_queue.put({
         "chat_id": q.message.chat_id,
         "source": source,
-        "chapter": {"url": url},
+        "chapter_url": url,
         "user": user
     })
 
@@ -274,19 +274,30 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
+# INICIAR WORKER CORRETAMENTE
+# =========================
+async def post_init(app: Application):
+    asyncio.create_task(worker(app))
+
+
+# =========================
 # MAIN
 # =========================
 def main():
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
     app.add_handler(CommandHandler("bb", bb))
     app.add_handler(CallbackQueryHandler(selecionar, pattern="^select"))
     app.add_handler(CallbackQueryHandler(download, pattern="^download"))
 
-    app.create_task(worker(app))
-
     print("👑 BOT GOD ONLINE")
+
     app.run_polling()
 
 
