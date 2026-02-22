@@ -17,8 +17,6 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from telegram.error import RetryAfter, TimedOut, NetworkError
-
 from utils.loader import get_all_sources
 from utils.cbz import create_cbz
 from utils.queue_manager import (
@@ -33,20 +31,39 @@ logging.basicConfig(level=logging.INFO)
 DOWNLOAD_SEMAPHORE = asyncio.Semaphore(2)
 CHAPTERS_PER_PAGE = 10
 USER_COOLDOWN = {}
-COOLDOWN_TIME = 5
+COOLDOWN_TIME = 4
 
 
 # =====================================================
-# ANI LIST API (PT-BR)
+# TRADUÇÃO SIMPLES PARA PT-BR
+# =====================================================
+async def translate_to_pt(text):
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                "https://translate.googleapis.com/translate_a/single",
+                params={
+                    "client": "gtx",
+                    "sl": "auto",
+                    "tl": "pt",
+                    "dt": "t",
+                    "q": text
+                }
+            )
+        result = r.json()
+        return "".join([item[0] for item in result[0]])
+    except:
+        return text
+
+
+# =====================================================
+# ANI LIST
 # =====================================================
 async def fetch_anilist_info(title):
 
     query = """
     query ($search: String) {
       Media(search: $search, type: MANGA) {
-        title {
-          romaji
-        }
         description(asHtml: false)
         status
         genres
@@ -57,16 +74,13 @@ async def fetch_anilist_info(title):
     }
     """
 
-    variables = {"search": title}
-
     async with httpx.AsyncClient() as client:
         response = await client.post(
             "https://graphql.anilist.co",
-            json={"query": query, "variables": variables},
+            json={"query": query, "variables": {"search": title}},
         )
 
     data = response.json().get("data", {}).get("Media")
-
     if not data:
         return None
 
@@ -77,26 +91,18 @@ async def fetch_anilist_info(title):
         "CANCELLED": "Cancelado",
     }
 
+    synopsis = data.get("description") or "Sem descrição."
+    synopsis = synopsis[:1200]
+
+    # TRADUZ
+    synopsis_pt = await translate_to_pt(synopsis)
+
     return {
         "cover": data["coverImage"]["extraLarge"],
         "status": status_map.get(data["status"], "Desconhecido"),
         "genres": ", ".join(data["genres"]),
-        "synopsis": data["description"][:1000] if data["description"] else "Sem descrição."
+        "synopsis": synopsis_pt
     }
-
-
-# =====================================================
-# ANTI SPAM
-# =====================================================
-def is_on_cooldown(user_id):
-    now = time.time()
-    last = USER_COOLDOWN.get(user_id, 0)
-
-    if now - last < COOLDOWN_TIME:
-        return True
-
-    USER_COOLDOWN[user_id] = now
-    return False
 
 
 # =====================================================
@@ -127,7 +133,7 @@ async def send_chapter(message, source, chapter):
             )
 
         except Exception as e:
-            print("Erro:", e)
+            print("Erro envio:", e)
 
         finally:
             try:
@@ -149,9 +155,9 @@ async def download_worker():
                 job["source"],
                 job["chapter"],
             )
-            await asyncio.sleep(2)
-        except:
-            pass
+            await asyncio.sleep(1.5)
+        except Exception as e:
+            print("Erro worker:", e)
 
         remove_job()
         DOWNLOAD_QUEUE.task_done()
@@ -161,9 +167,6 @@ async def download_worker():
 # BUSCAR
 # =====================================================
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if is_on_cooldown(update.effective_user.id):
-        return await update.message.reply_text("⏳ Aguarde alguns segundos.")
 
     if not context.args:
         return await update.message.reply_text("Use: /buscar nome")
@@ -188,10 +191,8 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             context.user_data["chapters"] = chapters
             context.user_data["source"] = source
-            context.user_data["title"] = title
             context.user_data["page"] = 0
 
-            # ANI LIST
             info = await fetch_anilist_info(title)
 
             if info:
@@ -220,7 +221,7 @@ Sinopse:
 
 
 # =====================================================
-# LISTA DE CAPÍTULOS
+# LISTA PAGINADA (SEM DELETAR)
 # =====================================================
 async def send_chapter_list(message, context):
 
@@ -242,10 +243,8 @@ async def send_chapter_list(message, context):
         ])
 
     nav = []
-
     if start > 0:
         nav.append(InlineKeyboardButton("⬅️", callback_data="prev"))
-
     if end < len(chapters):
         nav.append(InlineKeyboardButton("➡️", callback_data="next"))
 
@@ -269,41 +268,42 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chapters = context.user_data["chapters"]
     source = context.user_data["source"]
 
+    # PAGINAÇÃO ESTÁVEL
     if query.data == "next":
         context.user_data["page"] += 1
-        await query.message.delete()
+        await query.message.edit_reply_markup(None)
         await send_chapter_list(query.message, context)
         return
 
     if query.data == "prev":
         context.user_data["page"] -= 1
-        await query.message.delete()
+        await query.message.edit_reply_markup(None)
         await send_chapter_list(query.message, context)
         return
 
+    # SELEÇÃO
     if query.data.startswith("select_"):
-
         number = query.data.split("_")[1]
-        context.user_data["selected"] = number
+        context.user_data["selected"] = float(number)
 
         keyboard = [
-            [InlineKeyboardButton("🔥 Baixar este", callback_data="download_one")],
-            [InlineKeyboardButton("⬇️ Baixar até aqui", callback_data="download_upto")],
-            [InlineKeyboardButton("📥 Baixar todos", callback_data="download_all")]
+            [InlineKeyboardButton("🔥 Baixar este", callback_data="one")],
+            [InlineKeyboardButton("⬇️ Baixar até aqui", callback_data="upto")],
+            [InlineKeyboardButton("📥 Baixar todos", callback_data="all")]
         ]
 
         await query.message.reply_text(
-            f"Capítulo {number} selecionado. Escolha a opção:",
+            f"Capítulo {number} selecionado:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
 
-    if query.data == "download_one":
-
+    # BAIXAR UM
+    if query.data == "one":
         number = context.user_data["selected"]
 
         for ch in chapters:
-            if str(ch.get("chapter_number")) == number:
+            if float(ch.get("chapter_number", 0)) == number:
                 await add_job({
                     "message": query.message,
                     "source": source,
@@ -314,9 +314,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("✅ Adicionado à fila.")
         return
 
-    if query.data == "download_upto":
-
-        number = float(context.user_data["selected"])
+    # BAIXAR ATÉ
+    if query.data == "upto":
+        number = context.user_data["selected"]
 
         for ch in chapters:
             if float(ch.get("chapter_number", 0)) <= number:
@@ -329,8 +329,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("⬇️ Capítulos adicionados até aqui.")
         return
 
-    if query.data == "download_all":
-
+    # BAIXAR TODOS (AGORA CORRETO)
+    if query.data == "all":
         for ch in chapters:
             await add_job({
                 "message": query.message,
@@ -339,6 +339,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             })
 
         await query.message.reply_text("📥 Todos capítulos adicionados na fila.")
+        return
 
 
 # =====================================================
