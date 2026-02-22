@@ -2,6 +2,7 @@ import os
 import asyncio
 import logging
 import time
+import httpx
 
 from telegram import (
     Update,
@@ -33,6 +34,55 @@ DOWNLOAD_SEMAPHORE = asyncio.Semaphore(2)
 CHAPTERS_PER_PAGE = 10
 USER_COOLDOWN = {}
 COOLDOWN_TIME = 5
+
+
+# =====================================================
+# ANI LIST API (PT-BR)
+# =====================================================
+async def fetch_anilist_info(title):
+
+    query = """
+    query ($search: String) {
+      Media(search: $search, type: MANGA) {
+        title {
+          romaji
+        }
+        description(asHtml: false)
+        status
+        genres
+        coverImage {
+          extraLarge
+        }
+      }
+    }
+    """
+
+    variables = {"search": title}
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "https://graphql.anilist.co",
+            json={"query": query, "variables": variables},
+        )
+
+    data = response.json().get("data", {}).get("Media")
+
+    if not data:
+        return None
+
+    status_map = {
+        "FINISHED": "Finalizado",
+        "RELEASING": "Em lançamento",
+        "NOT_YET_RELEASED": "Não lançado",
+        "CANCELLED": "Cancelado",
+    }
+
+    return {
+        "cover": data["coverImage"]["extraLarge"],
+        "status": status_map.get(data["status"], "Desconhecido"),
+        "genres": ", ".join(data["genres"]),
+        "synopsis": data["description"][:1000] if data["description"] else "Sem descrição."
+    }
 
 
 # =====================================================
@@ -71,22 +121,13 @@ async def send_chapter(message, source, chapter):
                 f"Cap_{num}"
             )
 
-            while True:
-                try:
-                    await message.reply_document(
-                        document=cbz_buffer,
-                        filename=cbz_name
-                    )
-                    break
-
-                except RetryAfter as e:
-                    await asyncio.sleep(int(e.retry_after) + 2)
-
-                except (TimedOut, NetworkError):
-                    await asyncio.sleep(5)
+            await message.reply_document(
+                document=cbz_buffer,
+                filename=cbz_name
+            )
 
         except Exception as e:
-            print(f"Erro capítulo {num}:", e)
+            print("Erro:", e)
 
         finally:
             try:
@@ -99,8 +140,6 @@ async def send_chapter(message, source, chapter):
 # WORKER
 # =====================================================
 async def download_worker():
-    print("✅ Worker Elite iniciado")
-
     while True:
         job = await DOWNLOAD_QUEUE.get()
 
@@ -111,9 +150,8 @@ async def download_worker():
                 job["chapter"],
             )
             await asyncio.sleep(2)
-
-        except Exception as e:
-            print("Erro no worker:", e)
+        except:
+            pass
 
         remove_job()
         DOWNLOAD_QUEUE.task_done()
@@ -124,13 +162,11 @@ async def download_worker():
 # =====================================================
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    user_id = update.effective_user.id
-
-    if is_on_cooldown(user_id):
+    if is_on_cooldown(update.effective_user.id):
         return await update.message.reply_text("⏳ Aguarde alguns segundos.")
 
     if not context.args:
-        return await update.message.reply_text("Use: /buscar nome_do_manga")
+        return await update.message.reply_text("Use: /buscar nome")
 
     query_text = " ".join(context.args)
     sources = get_all_sources()
@@ -144,19 +180,10 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
 
             manga = results[0]
-
             title = manga.get("title")
             url = manga.get("url")
-            cover = manga.get("cover")
-            status = manga.get("status", "Desconhecido")
-            genres = manga.get("genres", "Não informado")
-            synopsis = manga.get("synopsis", "Sem descrição.")
 
             chapters = await source.chapters(url)
-
-            if not chapters:
-                return await update.message.reply_text("❌ Nenhum capítulo encontrado.")
-
             chapters.sort(key=lambda x: float(x.get("chapter_number", 0)))
 
             context.user_data["chapters"] = chapters
@@ -164,36 +191,38 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["title"] = title
             context.user_data["page"] = 0
 
-            caption = f"""📚 «{title}»
+            # ANI LIST
+            info = await fetch_anilist_info(title)
 
-Status » {status}
-Gênero: {genres}
+            if info:
+                caption = f"""📚 «{title}»
+
+Status » {info['status']}
+Gênero: {info['genres']}
 
 Sinopse:
-{synopsis}
+{info['synopsis']}
 
 🔗 @animesmangas308"""
 
-            if cover:
-                await update.message.reply_photo(photo=cover, caption=caption)
-            else:
-                await update.message.reply_text(caption)
+                await update.message.reply_photo(
+                    photo=info["cover"],
+                    caption=caption
+                )
 
-            msg = await update.message.reply_text("Escolha o capítulo:")
-            await send_chapter_page(msg, context)
-
+            await send_chapter_list(update.message, context)
             return
 
         except Exception as e:
-            print(f"Erro na fonte {source_name}:", e)
+            print("Erro:", e)
 
     await update.message.reply_text("❌ Nenhum resultado encontrado.")
 
 
 # =====================================================
-# PAGINAÇÃO
+# LISTA DE CAPÍTULOS
 # =====================================================
-async def send_chapter_page(message, context):
+async def send_chapter_list(message, context):
 
     chapters = context.user_data["chapters"]
     page = context.user_data["page"]
@@ -208,40 +237,25 @@ async def send_chapter_page(message, context):
         keyboard.append([
             InlineKeyboardButton(
                 f"📖 Capítulo {num}",
-                callback_data=f"cap_{num}"
+                callback_data=f"select_{num}"
             )
         ])
 
-    nav_buttons = []
+    nav = []
 
     if start > 0:
-        nav_buttons.append(
-            InlineKeyboardButton("⬅️", callback_data="prev")
-        )
+        nav.append(InlineKeyboardButton("⬅️", callback_data="prev"))
 
     if end < len(chapters):
-        nav_buttons.append(
-            InlineKeyboardButton("➡️", callback_data="next")
-        )
+        nav.append(InlineKeyboardButton("➡️", callback_data="next"))
 
-    if nav_buttons:
-        keyboard.append(nav_buttons)
+    if nav:
+        keyboard.append(nav)
 
-    keyboard.append([
-        InlineKeyboardButton("🔥 Baixar este", callback_data="latest")
-    ])
-
-    keyboard.append([
-        InlineKeyboardButton("⬇️ Baixar até aqui", callback_data="upto")
-    ])
-
-    keyboard.append([
-        InlineKeyboardButton("📥 Baixar todos", callback_data="all")
-    ])
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await message.edit_reply_markup(reply_markup=reply_markup)
+    await message.reply_text(
+        "Escolha o capítulo:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 
 # =====================================================
@@ -252,67 +266,41 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    chapters = context.user_data.get("chapters")
-    source = context.user_data.get("source")
-
-    if not chapters:
-        return await query.message.reply_text("Sessão expirada. Use /buscar novamente.")
+    chapters = context.user_data["chapters"]
+    source = context.user_data["source"]
 
     if query.data == "next":
         context.user_data["page"] += 1
-        await send_chapter_page(query.message, context)
+        await query.message.delete()
+        await send_chapter_list(query.message, context)
         return
 
     if query.data == "prev":
         context.user_data["page"] -= 1
-        await send_chapter_page(query.message, context)
+        await query.message.delete()
+        await send_chapter_list(query.message, context)
         return
 
-    if query.data == "all":
-        for ch in chapters:
-            await add_job({
-                "message": query.message,
-                "source": source,
-                "chapter": ch,
-            })
+    if query.data.startswith("select_"):
 
-        await query.message.reply_text("✅ Todos capítulos adicionados na fila.")
-        return
-
-    if query.data == "latest":
-        latest = chapters[-1]
-
-        await add_job({
-            "message": query.message,
-            "source": source,
-            "chapter": latest,
-        })
-
-        await query.message.reply_text(
-            f"🔥 Último capítulo {latest.get('chapter_number')} adicionado."
-        )
-        return
-
-    if query.data == "upto":
-        page = context.user_data["page"]
-        end = (page + 1) * CHAPTERS_PER_PAGE
-
-        count = 0
-        for ch in chapters[:end]:
-            await add_job({
-                "message": query.message,
-                "source": source,
-                "chapter": ch,
-            })
-            count += 1
-
-        await query.message.reply_text(
-            f"⬇️ {count} capítulos adicionados até esta página."
-        )
-        return
-
-    if query.data.startswith("cap_"):
         number = query.data.split("_")[1]
+        context.user_data["selected"] = number
+
+        keyboard = [
+            [InlineKeyboardButton("🔥 Baixar este", callback_data="download_one")],
+            [InlineKeyboardButton("⬇️ Baixar até aqui", callback_data="download_upto")],
+            [InlineKeyboardButton("📥 Baixar todos", callback_data="download_all")]
+        ]
+
+        await query.message.reply_text(
+            f"Capítulo {number} selecionado. Escolha a opção:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    if query.data == "download_one":
+
+        number = context.user_data["selected"]
 
         for ch in chapters:
             if str(ch.get("chapter_number")) == number:
@@ -323,18 +311,34 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 })
                 break
 
-        await query.message.reply_text(
-            f"✅ Capítulo {number} adicionado na fila."
-        )
+        await query.message.reply_text("✅ Adicionado à fila.")
+        return
 
+    if query.data == "download_upto":
 
-# =====================================================
-# STATUS
-# =====================================================
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"📦 Capítulos na fila: {queue_size()}"
-    )
+        number = float(context.user_data["selected"])
+
+        for ch in chapters:
+            if float(ch.get("chapter_number", 0)) <= number:
+                await add_job({
+                    "message": query.message,
+                    "source": source,
+                    "chapter": ch,
+                })
+
+        await query.message.reply_text("⬇️ Capítulos adicionados até aqui.")
+        return
+
+    if query.data == "download_all":
+
+        for ch in chapters:
+            await add_job({
+                "message": query.message,
+                "source": source,
+                "chapter": ch,
+            })
+
+        await query.message.reply_text("📥 Todos capítulos adicionados na fila.")
 
 
 # =====================================================
@@ -347,16 +351,13 @@ def main():
     ).build()
 
     app.add_handler(CommandHandler("buscar", buscar))
-    app.add_handler(CommandHandler("status", status))
     app.add_handler(CallbackQueryHandler(button_handler))
 
     async def startup(app):
         asyncio.create_task(download_worker())
-        print("✅ Worker iniciado")
 
     app.post_init = startup
 
-    print("🤖 Bot iniciado...")
     app.run_polling(drop_pending_updates=True)
 
 
