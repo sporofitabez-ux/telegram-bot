@@ -21,10 +21,19 @@ logging.basicConfig(level=logging.INFO)
 
 CHAPTERS_PER_PAGE = 10
 WAITING_FOR_CAP = 1
-MAX_CHAPTERS_PER_REQUEST = 150
+MAX_CHAPTERS_PER_REQUEST = 300
 
 
-# ================= SESSÕES =================
+# ================= UTILS =================
+def sort_chapters(chapters):
+    def get_number(ch):
+        try:
+            return float(ch.get("chapter_number") or 0)
+        except:
+            return 0
+    return sorted(chapters, key=get_number)
+
+
 def get_sessions(context):
     if "sessions" not in context.chat_data:
         context.chat_data["sessions"] = {}
@@ -49,12 +58,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= STATUS =================
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "📊 Status do Sistema\n\n"
+    text = "📊 Status\n\n"
 
     if current_job:
         text += (
             f"🔄 Em andamento\n"
-            f"User: {current_job.user_id}\n"
+            f"Usuário: {current_job.user_id}\n"
             f"Progresso: {current_job.progress}/{current_job.total}\n\n"
         )
     else:
@@ -74,13 +83,13 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sources = get_all_sources()
     buttons = []
 
-    status_msg = await update.message.reply_text("🔎 Buscando...")
+    msg = await update.message.reply_text("🔎 Buscando...")
 
     for source_name, source in sources.items():
         try:
             results = await asyncio.wait_for(
                 source.search(query_text),
-                timeout=15
+                timeout=20
             )
 
             for manga in results[:6]:
@@ -90,20 +99,19 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         callback_data=f"m|{source_name}|{manga['url']}|0"
                     )
                 ])
-
         except:
             continue
 
     if not buttons:
-        return await status_msg.edit_text("❌ Nenhum resultado encontrado.")
+        return await msg.edit_text("❌ Nenhum resultado.")
 
-    await status_msg.edit_text(
+    await msg.edit_text(
         f"🔎 Resultados para: {query_text}",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
 
-# ================= LISTAR CAPÍTULOS =================
+# ================= CAPÍTULOS =================
 async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -112,7 +120,7 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     page = int(page_str)
 
     source = get_all_sources()[source_name]
-    chapters = await source.chapters(manga_id)
+    chapters = sort_chapters(await source.chapters(manga_id))
 
     session = get_session(context, query.message.message_id)
     session["chapters"] = chapters
@@ -153,7 +161,7 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ================= OPÇÕES DOWNLOAD NOVAS =================
+# ================= OPÇÕES =================
 async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -175,7 +183,7 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ================= PROCESSAR DOWNLOAD =================
+# ================= DOWNLOAD =================
 async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -189,15 +197,12 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if mode == "single":
         selected = [chapters[index]]
-
     elif mode == "all":
         selected = chapters
-
     else:
         return
 
-    if len(selected) > MAX_CHAPTERS_PER_REQUEST:
-        selected = selected[:MAX_CHAPTERS_PER_REQUEST]
+    selected = selected[:MAX_CHAPTERS_PER_REQUEST]
 
     job = MangaJob(
         user_id=query.from_user.id,
@@ -209,11 +214,11 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await download_queue.put(job)
 
     await query.message.reply_text(
-        f"📌 Job criado!\nCapítulos: {job.total}"
+        f"📌 Adicionado à fila.\nCapítulos: {job.total}"
     )
 
 
-# ================= CAP X =================
+# ================= ATÉ CAP X =================
 async def input_cap_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.message.reply_text(
@@ -226,18 +231,30 @@ async def receive_cap_number(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         cap_number = float(update.message.text.strip())
     except:
+        await update.message.reply_text("Número inválido.")
         return WAITING_FOR_CAP
 
     reply = update.message.reply_to_message
-    session = get_session(context, reply.message_id)
+    if not reply:
+        return ConversationHandler.END
 
+    session = get_session(context, reply.message_id)
     chapters = session["chapters"]
     source_name = session["source_name"]
 
-    selected = [
-        c for c in chapters
-        if float(c.get("chapter_number") or 0) <= cap_number
-    ]
+    selected = []
+
+    for c in chapters:
+        try:
+            num = float(c.get("chapter_number") or 0)
+            if num <= cap_number:
+                selected.append(c)
+        except:
+            continue
+
+    if not selected:
+        await update.message.reply_text("Nenhum capítulo encontrado.")
+        return ConversationHandler.END
 
     job = MangaJob(
         user_id=update.effective_user.id,
@@ -249,7 +266,7 @@ async def receive_cap_number(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await download_queue.put(job)
 
     await update.message.reply_text(
-        f"📌 Job criado!\nCapítulos: {job.total}"
+        f"📌 Adicionado à fila.\nCapítulos: {job.total}"
     )
 
     return ConversationHandler.END
