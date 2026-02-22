@@ -22,7 +22,7 @@ from utils.queue_manager import (
 
 logging.basicConfig(level=logging.INFO)
 
-# limita downloads simultâneos (protege RAM)
+# evita estourar RAM
 DOWNLOAD_SEMAPHORE = asyncio.Semaphore(2)
 
 
@@ -48,7 +48,6 @@ async def send_chapter(message, source, chapter):
                 f"Cap_{num}"
             )
 
-            # retry automático Telegram
             while True:
                 try:
                     await message.reply_document(
@@ -77,7 +76,7 @@ async def send_chapter(message, source, chapter):
 
 
 # =====================================================
-# WORKER (CÉREBRO DO BOT)
+# WORKER (PROCESSADOR DA FILA)
 # =====================================================
 async def download_worker():
 
@@ -104,58 +103,76 @@ async def download_worker():
 
 
 # =====================================================
-# COMANDOS
+# COMANDO BUSCAR
 # =====================================================
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not context.args:
-        return await update.message.reply_text("Use: /buscar nome_do_manga")
+        return await update.message.reply_text(
+            "Use: /buscar nome_do_manga"
+        )
 
-    query = " ".join(context.args)
+    query_text = " ".join(context.args)
     sources = get_all_sources()
 
-    await update.message.reply_text("🔎 Procurando manga...")
+    await update.message.reply_text(f"🔎 Buscando: {query_text}")
 
-    # tenta todas fontes disponíveis
+    total_added = 0
+
+    # tenta todas as fontes
     for source_name, source in sources.items():
         try:
-            mangas = await source.search(query)
+            results = await source.search(query_text)
 
-            if not mangas:
+            if not results:
                 continue
 
-            manga = mangas[0]
-            chapters = await source.chapters(manga["url"])
+            # pega até 3 resultados para evitar fila gigante acidental
+            for manga in results[:3]:
 
-            await update.message.reply_text(
-                f"📥 {len(chapters)} capítulos adicionados na fila."
-            )
+                title = manga.get("title")
+                url = manga.get("url")
 
-            for ch in chapters:
-                await add_job({
-                    "message": update.message,
-                    "source": source,
-                    "chapter": ch,
-                    "meta": {
-                        "title": manga["title"],
-                        "chapter": ch.get("chapter_number"),
-                    }
-                })
+                chapters = await source.chapters(url)
 
-            return
+                for ch in chapters:
+                    await add_job({
+                        "message": update.message,
+                        "source": source,
+                        "chapter": ch,
+                        "meta": {
+                            "title": title,
+                            "chapter": ch.get("chapter_number"),
+                        }
+                    })
+
+                total_added += len(chapters)
 
         except Exception as e:
-            print("Fonte falhou:", e)
+            print(f"Erro na fonte {source_name}:", e)
 
-    await update.message.reply_text("❌ Nenhuma fonte respondeu.")
+    if total_added == 0:
+        return await update.message.reply_text(
+            "❌ Nenhum resultado encontrado."
+        )
+
+    await update.message.reply_text(
+        f"✅ {total_added} capítulos adicionados na fila."
+    )
 
 
+# =====================================================
+# STATUS DA FILA
+# =====================================================
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"📦 Capítulos na fila: {queue_size()}"
     )
 
 
+# =====================================================
+# CANCELAR DOWNLOADS
+# =====================================================
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     while not DOWNLOAD_QUEUE.empty():
@@ -177,7 +194,6 @@ def main():
         os.getenv("BOT_TOKEN")
     ).build()
 
-    # comandos
     app.add_handler(CommandHandler("buscar", buscar))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("cancelar", cancelar))
