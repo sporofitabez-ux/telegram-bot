@@ -21,7 +21,7 @@ logging.basicConfig(level=logging.INFO)
 
 CHAPTERS_PER_PAGE = 10
 WAITING_FOR_CAP = 1
-MAX_CHAPTERS_PER_REQUEST = 80
+MAX_CHAPTERS_PER_REQUEST = 150
 
 
 # ================= SESSÕES =================
@@ -40,7 +40,7 @@ async def post_init(app):
     app.create_task(worker())
 
 
-# ================= COMANDO YUKI =================
+# ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🌸 Yuki Manga Bot\n\nUse /search nome_do_manga"
@@ -54,7 +54,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if current_job:
         text += (
             f"🔄 Em andamento\n"
-            f"ID: {current_job.id}\n"
+            f"User: {current_job.user_id}\n"
             f"Progresso: {current_job.progress}/{current_job.total}\n\n"
         )
     else:
@@ -65,19 +65,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
-# ================= CANCEL =================
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not current_job:
-        return await update.message.reply_text("Nenhum job ativo.")
-
-    if current_job.user_id != update.effective_user.id:
-        return await update.message.reply_text("Você não pode cancelar esse job.")
-
-    current_job.cancelled = True
-    await update.message.reply_text("⛔ Job cancelado.")
-
-
-# ================= SEARCH COM TIMEOUT =================
+# ================= SEARCH =================
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         return await update.message.reply_text("Use /search nome")
@@ -90,8 +78,6 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for source_name, source in sources.items():
         try:
-            print(f"Buscando na fonte: {source_name}")
-
             results = await asyncio.wait_for(
                 source.search(query_text),
                 timeout=15
@@ -105,12 +91,7 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 ])
 
-        except asyncio.TimeoutError:
-            print(f"Timeout na fonte {source_name}")
-            continue
-
-        except Exception as e:
-            print(f"Erro na fonte {source_name}: {e}")
+        except:
             continue
 
     if not buttons:
@@ -172,7 +153,7 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ================= OPÇÕES DOWNLOAD =================
+# ================= OPÇÕES DOWNLOAD NOVAS =================
 async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -184,8 +165,7 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     buttons = [
         [InlineKeyboardButton("📥 Baixar este", callback_data="d|single")],
-        [InlineKeyboardButton("📥 Baixar deste até o fim", callback_data="d|from")],
-        [InlineKeyboardButton("📥 Baixar até aqui", callback_data="d|to")],
+        [InlineKeyboardButton("📥 Baixar todos", callback_data="d|all")],
         [InlineKeyboardButton("📥 Baixar até cap X", callback_data="input_cap")],
     ]
 
@@ -201,7 +181,6 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     session = get_session(context, query.message.message_id)
-
     chapters = session["chapters"]
     index = session["selected_index"]
     source_name = session["source_name"]
@@ -210,10 +189,10 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if mode == "single":
         selected = [chapters[index]]
-    elif mode == "from":
-        selected = chapters[index:]
-    elif mode == "to":
-        selected = chapters[: index + 1]
+
+    elif mode == "all":
+        selected = chapters
+
     else:
         return
 
@@ -230,9 +209,7 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await download_queue.put(job)
 
     await query.message.reply_text(
-        f"📌 Job criado!\n"
-        f"ID: {job.id}\n"
-        f"Capítulos: {job.total}"
+        f"📌 Job criado!\nCapítulos: {job.total}"
     )
 
 
@@ -262,9 +239,6 @@ async def receive_cap_number(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if float(c.get("chapter_number") or 0) <= cap_number
     ]
 
-    if len(selected) > MAX_CHAPTERS_PER_REQUEST:
-        selected = selected[:MAX_CHAPTERS_PER_REQUEST]
-
     job = MangaJob(
         user_id=update.effective_user.id,
         message=update.message,
@@ -275,9 +249,7 @@ async def receive_cap_number(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await download_queue.put(job)
 
     await update.message.reply_text(
-        f"📌 Job criado!\n"
-        f"ID: {job.id}\n"
-        f"Capítulos: {job.total}"
+        f"📌 Job criado!\nCapítulos: {job.total}"
     )
 
     return ConversationHandler.END
@@ -295,7 +267,6 @@ def main():
     app.add_handler(CommandHandler("Yuki", start))
     app.add_handler(CommandHandler("search", buscar))
     app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("cancel", cancel))
 
     app.add_handler(CallbackQueryHandler(manga_callback, pattern="^m\\|"))
     app.add_handler(CallbackQueryHandler(chapter_callback, pattern="^c\\|"))
