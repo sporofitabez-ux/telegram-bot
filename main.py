@@ -43,8 +43,7 @@ async def post_init(app):
 # ================= COMANDO YUKI =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🌸 Yuki Manga Bot\n\n"
-        "Use /search nome_do_manga"
+        "🌸 Yuki Manga Bot\n\nUse /search nome_do_manga"
     )
 
 
@@ -78,7 +77,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⛔ Job cancelado.")
 
 
-# ================= SEARCH =================
+# ================= SEARCH COM TIMEOUT =================
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         return await update.message.reply_text("Use /search nome")
@@ -87,9 +86,17 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sources = get_all_sources()
     buttons = []
 
+    status_msg = await update.message.reply_text("🔎 Buscando...")
+
     for source_name, source in sources.items():
         try:
-            results = await source.search(query_text)
+            print(f"Buscando na fonte: {source_name}")
+
+            results = await asyncio.wait_for(
+                source.search(query_text),
+                timeout=15
+            )
+
             for manga in results[:6]:
                 buttons.append([
                     InlineKeyboardButton(
@@ -97,11 +104,20 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         callback_data=f"m|{source_name}|{manga['url']}|0"
                     )
                 ])
-        except:
-            pass
 
-    await update.message.reply_text(
-        f"🔎 {query_text}",
+        except asyncio.TimeoutError:
+            print(f"Timeout na fonte {source_name}")
+            continue
+
+        except Exception as e:
+            print(f"Erro na fonte {source_name}: {e}")
+            continue
+
+    if not buttons:
+        return await status_msg.edit_text("❌ Nenhum resultado encontrado.")
+
+    await status_msg.edit_text(
+        f"🔎 Resultados para: {query_text}",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
