@@ -1,9 +1,8 @@
-import os
 import zipfile
 import httpx
 import asyncio
+from io import BytesIO
 
-os.makedirs("tmp", exist_ok=True)
 
 async def download_image(client, url):
     try:
@@ -14,12 +13,12 @@ async def download_image(client, url):
         print(f"Erro ao baixar imagem: {e}")
         return None
 
+
 async def create_cbz(image_urls, manga_title, chapter_name):
     safe_title = manga_title.replace("/", "").replace(" ", "_")
     safe_chapter = str(chapter_name).replace("/", "").replace(" ", "_")
 
     cbz_filename = f"{safe_title}_{safe_chapter}.cbz"
-    cbz_path = os.path.join("tmp", cbz_filename)
 
     async with httpx.AsyncClient() as client:
         tasks = [download_image(client, url) for url in image_urls]
@@ -30,8 +29,13 @@ async def create_cbz(image_urls, manga_title, chapter_name):
     if not images:
         raise Exception("Nenhuma imagem foi baixada")
 
-    with zipfile.ZipFile(cbz_path, "w") as cbz:
+    # 🔥 CRIA CBZ NA MEMÓRIA
+    cbz_buffer = BytesIO()
+
+    with zipfile.ZipFile(cbz_buffer, "w", compression=zipfile.ZIP_DEFLATED) as cbz:
         for i, img_bytes in enumerate(images):
             cbz.writestr(f"{i+1}.jpg", img_bytes)
 
-    return cbz_path, cbz_filename
+    cbz_buffer.seek(0)
+
+    return cbz_buffer, cbz_filename
