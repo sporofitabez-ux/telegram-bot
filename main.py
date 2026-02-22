@@ -41,6 +41,7 @@ BOT_MESSAGES = {}
 AUTHORIZED_USERS = [
     7506598563,  # Substitua pelo seu ID
     7943806660,  # Outro usuário autorizado
+    1956546218,
 ]
 
 async def is_authorized(update: Update):
