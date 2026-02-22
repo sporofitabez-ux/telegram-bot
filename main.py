@@ -99,7 +99,6 @@ async def send_chapter(message, source, chapter):
 # WORKER
 # =====================================================
 async def download_worker():
-
     print("✅ Worker Elite iniciado")
 
     while True:
@@ -111,7 +110,6 @@ async def download_worker():
                 job["source"],
                 job["chapter"],
             )
-
             await asyncio.sleep(2)
 
         except Exception as e:
@@ -132,9 +130,7 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("⏳ Aguarde alguns segundos.")
 
     if not context.args:
-        return await update.message.reply_text(
-            "Use: /buscar nome_do_manga"
-        )
+        return await update.message.reply_text("Use: /buscar nome_do_manga")
 
     query_text = " ".join(context.args)
     sources = get_all_sources()
@@ -161,7 +157,6 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not chapters:
                 return await update.message.reply_text("❌ Nenhum capítulo encontrado.")
 
-            # ordena automaticamente
             chapters.sort(key=lambda x: float(x.get("chapter_number", 0)))
 
             context.user_data["chapters"] = chapters
@@ -184,7 +179,9 @@ Sinopse:
             else:
                 await update.message.reply_text(caption)
 
-            await send_chapter_page(update, context)
+            msg = await update.message.reply_text("Escolha o capítulo:")
+            await send_chapter_page(msg, context)
+
             return
 
         except Exception as e:
@@ -196,7 +193,7 @@ Sinopse:
 # =====================================================
 # PAGINAÇÃO
 # =====================================================
-async def send_chapter_page(update, context):
+async def send_chapter_page(message, context):
 
     chapters = context.user_data["chapters"]
     page = context.user_data["page"]
@@ -210,7 +207,7 @@ async def send_chapter_page(update, context):
         num = ch.get("chapter_number")
         keyboard.append([
             InlineKeyboardButton(
-                f"Capítulo {num}",
+                f"📖 Capítulo {num}",
                 callback_data=f"cap_{num}"
             )
         ])
@@ -231,15 +228,20 @@ async def send_chapter_page(update, context):
         keyboard.append(nav_buttons)
 
     keyboard.append([
+        InlineKeyboardButton("🔥 Baixar este", callback_data="latest")
+    ])
+
+    keyboard.append([
+        InlineKeyboardButton("⬇️ Baixar até aqui", callback_data="upto")
+    ])
+
+    keyboard.append([
         InlineKeyboardButton("📥 Baixar todos", callback_data="all")
     ])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text(
-        "Escolha o capítulo:",
-        reply_markup=reply_markup
-    )
+    await message.edit_reply_markup(reply_markup=reply_markup)
 
 
 # =====================================================
@@ -250,19 +252,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    chapters = context.user_data["chapters"]
-    source = context.user_data["source"]
+    chapters = context.user_data.get("chapters")
+    source = context.user_data.get("source")
+
+    if not chapters:
+        return await query.message.reply_text("Sessão expirada. Use /buscar novamente.")
 
     if query.data == "next":
         context.user_data["page"] += 1
-        await query.message.delete()
-        await send_chapter_page(update, context)
+        await send_chapter_page(query.message, context)
         return
 
     if query.data == "prev":
         context.user_data["page"] -= 1
-        await query.message.delete()
-        await send_chapter_page(update, context)
+        await send_chapter_page(query.message, context)
         return
 
     if query.data == "all":
@@ -273,7 +276,39 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "chapter": ch,
             })
 
-        await query.message.reply_text("✅ Todos capítulos adicionados.")
+        await query.message.reply_text("✅ Todos capítulos adicionados na fila.")
+        return
+
+    if query.data == "latest":
+        latest = chapters[-1]
+
+        await add_job({
+            "message": query.message,
+            "source": source,
+            "chapter": latest,
+        })
+
+        await query.message.reply_text(
+            f"🔥 Último capítulo {latest.get('chapter_number')} adicionado."
+        )
+        return
+
+    if query.data == "upto":
+        page = context.user_data["page"]
+        end = (page + 1) * CHAPTERS_PER_PAGE
+
+        count = 0
+        for ch in chapters[:end]:
+            await add_job({
+                "message": query.message,
+                "source": source,
+                "chapter": ch,
+            })
+            count += 1
+
+        await query.message.reply_text(
+            f"⬇️ {count} capítulos adicionados até esta página."
+        )
         return
 
     if query.data.startswith("cap_"):
@@ -288,7 +323,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 })
                 break
 
-        await query.message.reply_text(f"✅ Capítulo {number} adicionado.")
+        await query.message.reply_text(
+            f"✅ Capítulo {number} adicionado na fila."
+        )
 
 
 # =====================================================
