@@ -1,5 +1,7 @@
 import aiohttp
 import re
+import asyncio
+from googletrans import Translator
 
 ANILIST_URL = "https://graphql.anilist.co"
 
@@ -23,15 +25,20 @@ def format_manga_info(data):
         f"🖼️ Capa: {data['cover']}"
     )
 
+# Função para traduzir para PT-BR usando googletrans
+def translate_to_ptbr(text):
+    translator = Translator()
+    translation = translator.translate(text, src="en", dest="pt")
+    return translation.text
+
 async def search_anilist(title):
 
     query = """
     query ($search: String) {
-      Media(search: $search, type: MANGA, language: PORTUGUESE) {
+      Media(search: $search, type: MANGA) {
         title {
           romaji
           english
-          native
         }
         description(asHtml:false)
         genres
@@ -54,15 +61,24 @@ async def search_anilist(title):
 
     media = data["data"]["Media"]
 
-    # Tenta pegar a sinopse em português, se existir
     synopsis = clean_html(media.get("description"))
     synopsis = summarize(synopsis)
+    
+    # Traduz a sinopse para PT-BR
+    translated_synopsis = translate_to_ptbr(synopsis)
 
     manga_info = {
-        "title": media["title"].get("romaji") or media["title"].get("english") or media["title"].get("native"),
+        "title": media["title"].get("romaji") or media["title"].get("english"),
         "genres": ", ".join(media.get("genres", [])) or "Não disponível",
         "cover": media["coverImage"].get("extraLarge"),
-        "synopsis": synopsis or "Sem sinopse disponível.",
+        "synopsis": translated_synopsis or "Sem sinopse disponível.",
     }
 
     return format_manga_info(manga_info)
+
+
+# Exemplo de uso
+if __name__ == "__main__":
+    title = "One Piece"
+    result = asyncio.run(search_anilist(title))
+    print(result)
