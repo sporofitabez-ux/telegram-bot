@@ -14,16 +14,14 @@ from telegram.ext import (
 )
 
 from utils.loader import get_all_sources
-from utils.cbz import create_cbz
+from core.job_manager import MangaJob
+from core.queue_manager import download_queue, current_job, worker
 
 logging.basicConfig(level=logging.INFO)
 
 CHAPTERS_PER_PAGE = 10
 WAITING_FOR_CAP = 1
 MAX_CHAPTERS_PER_REQUEST = 80
-
-download_queue = asyncio.Queue()
-current_download = None
 
 
 # ================= SESSÕES =================
@@ -37,71 +35,47 @@ def get_session(context, message_id):
     return get_sessions(context).setdefault(str(message_id), {})
 
 
-def block_private(update: Update):
-    return update.effective_chat.type == "private"
-
-
-# ================= WORKER =================
-async def download_worker():
-    global current_download
-
-    while True:
-        job = await download_queue.get()
-        current_download = job
-
-        message = job["message"]
-        source = job["source"]
-        chapters = job["chapters"]
-        user = job["user"]
-
-        total = len(chapters)
-        sent = 0
-
-        status_msg = await message.reply_text(
-            f"📥 Download iniciado para {user}\nTotal: {total}"
-        )
-
-        for chapter in chapters:
-            try:
-                await send_chapter(message, source, chapter)
-                sent += 1
-
-                await status_msg.edit_text(
-                    f"📥 {user}\nProgresso: {sent}/{total}"
-                )
-
-            except Exception as e:
-                print("Erro:", e)
-
-        await status_msg.edit_text("✅ Download finalizado.")
-        current_download = None
-        download_queue.task_done()
-
-
+# ================= WORKER INIT =================
 async def post_init(app):
-    app.create_task(download_worker())
+    app.create_task(worker())
 
 
 # ================= COMANDO YUKI =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🌸 Yuki Manga Bot\nUse /search nome_do_manga"
+        "🌸 Yuki Manga Bot\n\n"
+        "Use /search nome_do_manga"
     )
 
 
 # ================= STATUS =================
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "📊 Fila:\n\n"
+    text = "📊 Status do Sistema\n\n"
 
-    if current_download:
-        text += f"🔄 Em andamento: {current_download['user']}\n"
-        text += f"Capítulos: {len(current_download['chapters'])}\n\n"
+    if current_job:
+        text += (
+            f"🔄 Em andamento\n"
+            f"ID: {current_job.id}\n"
+            f"Progresso: {current_job.progress}/{current_job.total}\n\n"
+        )
     else:
-        text += "Nenhum download ativo.\n\n"
+        text += "Nenhum job ativo\n\n"
 
     text += f"📦 Na fila: {download_queue.qsize()}"
 
     await update.message.reply_text(text)
+
+
+# ================= CANCEL =================
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not current_job:
+        return await update.message.reply_text("Nenhum job ativo.")
+
+    if current_job.user_id != update.effective_user.id:
+        return await update.message.reply_text("Você não pode cancelar esse job.")
+
+    current_job.cancelled = True
+    await update.message.reply_text("⛔ Job cancelado.")
 
 
 # ================= SEARCH =================
@@ -132,7 +106,7 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ================= LISTAR CAPÍTULOS COM PAGINAÇÃO =================
+# ================= LISTAR CAPÍTULOS =================
 async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -188,8 +162,8 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     session = get_session(context, query.message.message_id)
-
     _, index_str = query.data.split("|")
+
     session["selected_index"] = int(index_str)
 
     buttons = [
@@ -230,15 +204,19 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(selected) > MAX_CHAPTERS_PER_REQUEST:
         selected = selected[:MAX_CHAPTERS_PER_REQUEST]
 
-    await download_queue.put({
-        "message": query.message,
-        "source": get_all_sources()[source_name],
-        "chapters": selected,
-        "user": query.from_user.first_name
-    })
+    job = MangaJob(
+        user_id=query.from_user.id,
+        message=query.message,
+        source=get_all_sources()[source_name],
+        chapters=selected
+    )
+
+    await download_queue.put(job)
 
     await query.message.reply_text(
-        f"📌 Adicionado à fila ({len(selected)} caps)"
+        f"📌 Job criado!\n"
+        f"ID: {job.id}\n"
+        f"Capítulos: {job.total}"
     )
 
 
@@ -271,38 +249,22 @@ async def receive_cap_number(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if len(selected) > MAX_CHAPTERS_PER_REQUEST:
         selected = selected[:MAX_CHAPTERS_PER_REQUEST]
 
-    await download_queue.put({
-        "message": update.message,
-        "source": get_all_sources()[source_name],
-        "chapters": selected,
-        "user": update.effective_user.first_name
-    })
+    job = MangaJob(
+        user_id=update.effective_user.id,
+        message=update.message,
+        source=get_all_sources()[source_name],
+        chapters=selected
+    )
+
+    await download_queue.put(job)
 
     await update.message.reply_text(
-        f"📌 Adicionado à fila ({len(selected)} caps)"
+        f"📌 Job criado!\n"
+        f"ID: {job.id}\n"
+        f"Capítulos: {job.total}"
     )
 
     return ConversationHandler.END
-
-
-# ================= ENVIAR CAP =================
-async def send_chapter(message, source, chapter):
-    imgs = await source.pages(chapter["url"])
-    if not imgs:
-        return
-
-    cbz_path, cbz_name = await create_cbz(
-        imgs,
-        chapter.get("manga_title", "Manga"),
-        f"Cap_{chapter.get('chapter_number')}"
-    )
-
-    await message.reply_document(
-        document=open(cbz_path, "rb"),
-        filename=cbz_name
-    )
-
-    os.remove(cbz_path)
 
 
 # ================= MAIN =================
@@ -317,6 +279,7 @@ def main():
     app.add_handler(CommandHandler("Yuki", start))
     app.add_handler(CommandHandler("search", buscar))
     app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("cancel", cancel))
 
     app.add_handler(CallbackQueryHandler(manga_callback, pattern="^m\\|"))
     app.add_handler(CallbackQueryHandler(chapter_callback, pattern="^c\\|"))
